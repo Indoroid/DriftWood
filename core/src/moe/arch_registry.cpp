@@ -1,0 +1,75 @@
+#include "bmoe/recipe.h"
+
+#include <cstring>
+
+namespace bmoe {
+
+// The registry. Ships Qwen3 MoE (Qwen3-30B-A3B and siblings). Most llama.cpp MoE models
+// are built by the same build_moe_ffn helper and expose the identical
+// `ffn_{gate,up,down}_exps` naming, so adding one is usually a single row here — see
+// docs/adding-a-model.md. Models that fuse gate+up into one tensor (a merged
+// `ffn_gate_up_exps`) name two expert tensors instead of three; that is still one row,
+// with the fused suffix in the first slot and a nullptr tail.
+static const MoeRecipe k_recipes[] = {
+    {"qwen3moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"qwen2moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    // qwen35moe (Qwen3.5 MoE, e.g. 35B-A3B) is a hybrid attention/SSM stack: some layers run
+    // full attention, others a Mamba-style SSM block, but every MoE layer names its experts
+    // with the standard split suffixes, so streaming is one row. There is also an always-on
+    // shared expert (ffn_*_shexp) that stays mmap-resident and lowers the streamed fraction.
+    {"qwen35moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    // gemma4 (Gemma 4 MoE, e.g. 26B-A4B) fuses gate+up into blk.<il>.ffn_gate_up_exps —
+    // to the streamer just an expert tensor with a 2x per-expert stride. The per-expert
+    // ffn_down_exps.scale, the router (ffn_gate_inp.{weight,scale}) and the always-on
+    // shared expert (the layer's dense ffn_{gate,up,down}) match no suffix and stay mmap-
+    // resident; the resident shared expert lowers the streamed fraction — see
+    // docs/limitations.md.
+    {"gemma4", {"ffn_gate_up_exps", "ffn_down_exps", nullptr}},
+    // gpt-oss (OpenAI MoE, e.g. gpt-oss-20b/120b: 24/36 layers, 128 experts, top-4) is a purely
+    // routed MoE with the standard split suffixes, so streaming is one row — and, unlike gemma4,
+    // it keeps NO shared/dense expert resident, so the streamed fraction is as high as qwen3moe's.
+    // Its weights ship in MXFP4; the streamer is quant-agnostic (the per-expert stride is read from
+    // the tensor's nb[2], whatever the block layout), so the native MXFP4 layout needs no special
+    // handling and the split-layout gate (qwen3moe) already covers this streaming path.
+    {"gpt-oss", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    // lfm2moe (Liquid AI LFM2/LFM2.5 MoE, e.g. 8B-A1B and 24B-A2B) is a hybrid stack like
+    // qwen35moe — some blocks run attention, others a short-convolution block — and it names its
+    // experts with the standard split suffixes, so streaming is one row. Two structural notes: the
+    // first `<arch>.leading_dense_block_count` blocks are dense and name no expert tensors at all,
+    // so they simply never bind and stay mmap-resident; and the router applies a per-expert bias
+    // (ffn_exp_probs_b) before the top-k, which changes which experts are selected but not the
+    // node the hook reads (ffn_moe_topk). Both lower the streamed fraction relative to a purely
+    // routed model — see docs/limitations.md.
+    {"lfm2moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    // deepseek4 (DeepSeek V4 Flash, 284B-A13B) reuses the V3.2 MoE routing — 256 routed experts,
+    // top-k with a per-expert bias (exp_probs_b, the lfm2moe pattern) plus one always-on shared
+    // expert (ffn_*_shexp) that matches no suffix and stays mmap-resident. The experts name the
+    // standard split suffixes, so streaming is one row. The V4 attention novelties (compressed
+    // sparse attention, the lightning indexer, its dedicated KV cache) are dense-side machinery
+    // inside llama.cpp and invisible to the streaming seam. Models this size ship as multi-shard
+    // ggufs; the streamer resolves each expert tensor to its (shard, offset) — see gguf_offsets.
+    {"deepseek4", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+};
+
+static const int k_n_recipes = (int) (sizeof(k_recipes) / sizeof(k_recipes[0]));
+
+const MoeRecipe * find_moe_recipe(const char * arch) {
+    if (!arch) {
+        return nullptr;
+    }
+    for (int i = 0; i < k_n_recipes; ++i) {
+        if (std::strcmp(k_recipes[i].arch, arch) == 0) {
+            return &k_recipes[i];
+        }
+    }
+    return nullptr;
+}
+
+int n_moe_recipes() {
+    return k_n_recipes;
+}
+const MoeRecipe * moe_recipe_at(int i) {
+    return (i >= 0 && i < k_n_recipes) ? &k_recipes[i] : nullptr;
+}
+
+} // namespace bmoe
