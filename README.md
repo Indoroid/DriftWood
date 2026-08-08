@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><b>Run Mixture-of-Experts models bigger than your device's RAM. On a phone, on a PC, CPU only.</b></p>
+<p align="center"><b>Forked from Helldez/BigMoeOnEdge. Run Mixture-of-Experts models bigger than your device's RAM. On a phone, on a PC, CPU only.</b></p>
 
 <p align="center">
   <a href="https://github.com/Helldez/BigMoeOnEdge/releases/latest"><img src="https://img.shields.io/github/v/release/Helldez/BigMoeOnEdge" alt="Latest release"></a>
