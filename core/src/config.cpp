@@ -1,5 +1,6 @@
 #include "bmoe/config.h"
 
+#include <algorithm>
 #include <utility>
 
 namespace bmoe {
@@ -24,14 +25,11 @@ ValidationResult validate(const RunConfig & cfg) {
     if (cfg.n_ctx <= 0) {
         return fail("n_ctx must be positive");
     }
-    // 0 means "as wide as the context"; anything larger than the context would be reserved for a
-    // batch that can never arrive, which is the opposite of what this knob is for.
-    if (cfg.n_ubatch < 0) {
-        return fail("n_ubatch must be >= 0 (0 = as wide as the context)");
+    if (cfg.n_batch <= 0) {
+        return fail("n_batch must be positive");
     }
-    if (cfg.n_ubatch > cfg.n_ctx) {
-        return fail("n_ubatch=" + std::to_string(cfg.n_ubatch) + " exceeds n_ctx=" + std::to_string(cfg.n_ctx) +
-                    ": the compute buffers would be reserved for a batch that cannot occur.");
+    if (cfg.n_ubatch < 0) {
+        return fail("n_ubatch must be >= 0 (0 = as wide as n_batch)");
     }
     // Lower bound only: 0 means "use the model default". The upper bound (<= the model's
     // real expert count) needs the loaded gguf, so it is deferred to run() where the model
@@ -93,13 +91,15 @@ ValidationResult validate(const RunConfig & cfg) {
     // TOGETHER. A narrower graph splits it back into single-token passes, which spends the draft
     // and keeps none of the amortisation — the feature would cost time and buy nothing. Rejected
     // rather than silently degraded: nothing in the output would show that it happened. 0 means
-    // "as wide as the context" and is always wide enough.
-    if (cfg.spec.enabled() && cfg.n_ubatch > 0 && cfg.n_ubatch < cfg.spec.draft_max + 1) {
-        return fail("n_ubatch=" + std::to_string(cfg.n_ubatch) + " is narrower than the verify batch (" +
+    // "as wide as n_batch".
+    const int effective_batch = std::min(cfg.n_batch, cfg.n_ctx);
+    const int effective_ubatch = cfg.n_ubatch > 0 ? std::min(cfg.n_ubatch, effective_batch) : effective_batch;
+    if (cfg.spec.enabled() && effective_ubatch < cfg.spec.draft_max + 1) {
+        return fail("effective n_ubatch=" + std::to_string(effective_ubatch) + " is narrower than the verify batch (" +
                     std::to_string(cfg.spec.draft_max + 1) +
                     " positions): the graph would be split back into single-token passes and speculation "
-                    "would draft at a cost with nothing to show for it. Raise n_ubatch or lower "
-                    "spec.draft_max.");
+                    "would draft at a cost with nothing to show for it. Raise n_batch/n_ubatch or "
+                    "lower spec.draft_max.");
     }
 
     // overlap is meaningless without streaming (it gates the streamer's own reads). The

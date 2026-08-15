@@ -217,17 +217,17 @@ int main() {
         expect_fail("a NaN threshold is rejected", c);
     }
 
-    // n_ubatch: 0 follows the context; a value above it would reserve compute buffers for a batch
-    // that cannot occur, which inverts the memory saving the knob exists for.
+    // Batch sizes are capped when the session opens, so defaults also work with a smaller context.
     {
         RunConfig c = ok_base();
-        expect_ok("n_ubatch 0 (follow the context) is the default and valid", c);
-        c.n_ubatch = 512;
-        expect_ok("an n_ubatch below n_ctx is valid", c);
-        c.n_ubatch = c.n_ctx;
-        expect_ok("an n_ubatch equal to n_ctx is valid", c);
-        c.n_ubatch = c.n_ctx + 1;
-        expect_fail("an n_ubatch above n_ctx is rejected", c);
+        expect_ok("batch defaults are valid", c);
+        c.n_ctx = 256;
+        expect_ok("batch defaults are capped to a smaller context", c);
+        c.n_batch = 0;
+        expect_fail("a zero n_batch is rejected", c);
+        c.n_batch = 2048;
+        c.n_ubatch = 0;
+        expect_ok("n_ubatch 0 follows n_batch", c);
         c.n_ubatch = -1;
         expect_fail("a negative n_ubatch is rejected", c);
     }
@@ -304,7 +304,7 @@ int main() {
         RunConfig c = ok_base();
         c.spec.source = DraftSource::mtp;
         c.spec.draft_max = 3;
-        expect_ok("the default ubatch (0 = as wide as the context) is valid with speculation", c);
+        expect_ok("the default ubatch is valid with speculation", c);
         c.n_ubatch = 4; // exactly 1 + draft_max
         expect_ok("a ubatch exactly as wide as the verify batch is valid", c);
         c.n_ubatch = 3;

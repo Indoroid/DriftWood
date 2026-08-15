@@ -68,7 +68,7 @@ struct MoeStreamConfig {
     // Overlap async expert reads with FFN compute instead of blocking on them: load_layer()
     // publishes the reads and returns immediately, and the CPU mul_mat_id kernel blocks per
     // expert (via the fork's expert-ready hook) only if that expert's slice is not yet in.
-    // Requires the Helldez/llama.cpp fork submodule (the hook); run() fails fast otherwise.
+    // Requires the Indoroid/llama.cpp fork submodule (the hook); run() fails fast otherwise.
     bool overlap = false;
 
     // Two-wave batch publish (#118). A layer's read batch normally becomes visible to the I/O
@@ -298,10 +298,13 @@ struct RunConfig {
     int n_threads = 4;
     int n_ctx = 2048;
 
-    // Largest batch computed in one graph, i.e. the prefill chunk size. 0 (the default) means
-    // "follow n_ctx", which prefills any fitting prompt in a single pass.
+    // Logical prefill chunk capacity. Capped at n_ctx when the session opens.
+    int n_batch = 2048;
+
+    // Largest batch computed in one graph. Capped at n_batch when the session opens; 0 retains the
+    // old "follow n_batch" behaviour for existing callers.
     //
-    // It is worth exposing because it does not only cost time, it costs RESIDENT MEMORY: the
+    // This is exposed because it does not only cost time, it costs RESIDENT MEMORY: the
     // scheduler reserves compute buffers for the worst-case graph, which is a full-width prefill,
     // and on this engine every MiB reserved is a MiB the expert cache and the dense weights do not
     // get. Measured at n_ctx 2048: 320 MiB of compute buffer, falling to 80 MiB at 512 — the
@@ -311,7 +314,7 @@ struct RunConfig {
     //
     // Decode is unaffected: a decode graph is one token wide whatever this says. The cost is
     // prefill throughput, which processes a long prompt in more, smaller passes.
-    int n_ubatch = 0;
+    int n_ubatch = 512;
     bool chatml = false;   // wrap the prompt in the model family's chat turn (arch-aware)
     bool progress = false; // emit machine telemetry (one JSON line per token)
 

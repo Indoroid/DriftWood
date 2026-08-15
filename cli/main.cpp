@@ -358,7 +358,8 @@ static void print_usage(const char * argv0) {
         "  -n, --n-predict N       tokens to generate (default 128)\n"
         "  -t, --threads N         compute threads (default 4)\n"
         "  -c, --ctx-size N        context size (default 2048)\n"
-        "      --ubatch N          widest graph computed at once (0 = as wide as the context).\n"
+        "      --batch-size N      logical prefill batch size (default 2048)\n"
+        "      --ubatch-size N     widest graph computed at once (default 512; --ubatch alias).\n"
         "                          Compute buffers are reserved for it, so a smaller value hands\n"
         "                          RAM back to the expert cache at the cost of prefill speed;\n"
         "                          decode is unaffected. Measured: a context of 2048 reserves\n"
@@ -562,8 +563,10 @@ int main(int argc, char ** argv) {
             cfg.n_threads = std::atoi(next("-t"));
         else if (a == "-c" || a == "--ctx-size")
             cfg.n_ctx = std::atoi(next("-c"));
-        else if (a == "--ubatch")
-            cfg.n_ubatch = std::atoi(next("--ubatch"));
+        else if (a == "--batch-size")
+            cfg.n_batch = std::atoi(next("--batch-size"));
+        else if (a == "--ubatch" || a == "--ubatch-size")
+            cfg.n_ubatch = std::atoi(next("--ubatch-size"));
         else if (a == "--n-expert-used")
             cfg.n_expert_used = std::atoi(next("--n-expert-used"));
         else if (a == "--temp")

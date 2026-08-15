@@ -46,6 +46,9 @@ weights, or its control flow. It stays inside the same callback contract; nothin
 `gguf_get_tensor_offset` (all public) give each tensor's absolute byte offset in the file,
 without loading any tensor data. We match these to the captured tensors by name.
 
+Model loading also stays on the public API: `llama_model_params.load_mode` is fixed to
+`LLAMA_LOAD_MODE_MMAP`, and `use_extra_bufts=false` prevents repacking before tensor rebinding.
+
 ## 3. The expert-ready hook (fork extension)
 
 Sections 1 and 2 are enough for the *serial* streamer: block on the expert reads, then let
@@ -53,8 +56,8 @@ the layer compute. Overlapping the two — reading a token's experts while the s
 expert matmuls are running — needs a wait point that no public API exposes. That is the one
 place where BigMoeOnEdge carries a llama.cpp extension.
 
-**What it is.** A single optional hook, ~25 lines, living on the fork branch
-`bmoe/expert-ready-hook` of `Helldez/llama.cpp` as a single commit on top of the upstream
+**What it is.** A single optional hook, 16 added lines, living on the fork branch
+`bmoe/expert-ready-hook` of `Indoroid/llama.cpp` as a single commit on top of the upstream
 pin. It adds nothing to the model files and changes no data layout; it is a callback the
 CPU MoE kernel invokes.
 
@@ -170,7 +173,7 @@ Because the submodule pins the `bmoe/expert-ready-hook` fork branch (section 3),
 rebases that 1-commit branch onto the new upstream tag, re-pushes it, and re-pins:
 
 ```bash
-# in a Helldez/llama.cpp checkout: rebase the single hook commit onto the new tag
+# in an Indoroid/llama.cpp checkout: rebase the single hook commit onto the new tag
 git fetch upstream && git checkout bmoe/expert-ready-hook
 git rebase <newer-upstream-tag> && git push --force-with-lease origin bmoe/expert-ready-hook
 
@@ -193,7 +196,7 @@ output. Each supported architecture adds one more gate to keep green across a bu
 If a future release moves the two hooks (a stable expert-residency API, say) upstream,
 this seam shrinks further or disappears — `core/` does not change.
 
-Pinned submodule at the time of writing: `Helldez/llama.cpp` branch
-`bmoe/expert-ready-hook`, commit `5236140` — the single expert-ready-hook commit (section 3)
-on top of upstream `ggml-org/llama.cpp` master `22b69b6` (see `.gitmodules` /
+Pinned submodule at the time of writing: `Indoroid/llama.cpp` branch
+`bmoe/expert-ready-hook`, commit `037aba22f` - the single expert-ready-hook commit (section 3)
+on top of `Indoroid/llama.cpp` master `822e17134` (see `.gitmodules` /
 `git submodule status` for the current pin).

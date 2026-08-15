@@ -25,6 +25,16 @@ Semantic Versioning.
   deterministic IDs when the model format supplies none.
 
 ### Fixed
+- **`--overlap` hook restored on the current llama.cpp fork.** The submodule now pins the
+  one-commit `bmoe/expert-ready-hook` branch on top of the merged BailingMoe3 llama.cpp changes,
+  so CPU expert matmuls can wait for streamed slices instead of rejecting overlap at startup.
+- **Bounded server compute-buffer reservation.** `bmoe-server` and `bmoe-cli` now default to a
+  2048-token logical batch and a 512-token physical batch, expose upstream-style `--batch-size`
+  and `--ubatch-size` controls, and cap both to the configured context. The old `--ubatch` spelling
+  remains an alias.
+- **Current llama.cpp model-load API.** The engine now requests mmap through
+  `LLAMA_LOAD_MODE_MMAP`, preserving the native-layout invariant after upstream removed the
+  `use_mmap` field.
 - **`bmoe-server` handles OpenAI SDK request formats.** Accepts `max_completion_tokens` (sent by the
   OpenAI/Node SDK as `max_completion_tokens`) in addition to `max_tokens`.
 - **`bmoe-server` handles `content` as a message content array.** Some OpenAI-compatible SDKs

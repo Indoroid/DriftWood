@@ -362,7 +362,7 @@ void Session::cancel() {
     impl_->cancel_requested.store(true, std::memory_order_relaxed);
 }
 
-std::unique_ptr<Session> Session::open(const SessionConfig & cfg,
+std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
                                        std::string & error,
                                        IRouteTraceSink * route_trace,
                                        IComputeTraceSink * compute_trace,
@@ -371,6 +371,14 @@ std::unique_ptr<Session> Session::open(const SessionConfig & cfg,
         error = std::move(msg);
         return nullptr;
     };
+
+    if (input_cfg.n_ctx <= 0) return fail("n_ctx must be positive");
+    if (input_cfg.n_batch <= 0) return fail("n_batch must be positive");
+    if (input_cfg.n_ubatch < 0) return fail("n_ubatch must be >= 0");
+
+    SessionConfig cfg = input_cfg;
+    cfg.n_batch = std::min(cfg.n_batch, cfg.n_ctx);
+    cfg.n_ubatch = cfg.n_ubatch > 0 ? std::min(cfg.n_ubatch, cfg.n_batch) : cfg.n_batch;
 
     // Create the session first so its Impl destructor owns backend teardown from this point
     // on: any failure below returns nullptr, destroying `self`, which frees the backend once.
@@ -404,7 +412,7 @@ std::unique_ptr<Session> Session::open(const SessionConfig & cfg,
     // Load with the layout the streamer requires: file-backed mmap, no repack (a repacked
     // q4_K buffer would break the rebind), experts on CPU.
     llama_model_params mparams = llama_model_default_params();
-    mparams.use_mmap = true;
+    mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
     mparams.use_extra_bufts = false;
     mparams.n_gpu_layers = 0;
 
@@ -490,11 +498,11 @@ std::unique_ptr<Session> Session::open(const SessionConfig & cfg,
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = cfg.n_ctx;
-    cparams.n_batch = cfg.n_batch;
+    cparams.n_batch = std::min<uint32_t>((uint32_t) cfg.n_batch, cparams.n_ctx);
     // The graph is reserved for the widest ubatch, so this is what sets the resident compute
     // buffers — the memory this engine is always short of. 0 keeps the historical behaviour
     // (one graph as wide as the batch); a smaller value chunks prefill to buy that memory back.
-    cparams.n_ubatch = cfg.n_ubatch > 0 ? (uint32_t) cfg.n_ubatch : (uint32_t) cfg.n_batch;
+    cparams.n_ubatch = std::min<uint32_t>((uint32_t) cfg.n_ubatch, cparams.n_batch);
     // The streamer needs the callback to see routing; the compute trace needs it to time nodes.
     // Installing it for the trace alone is what lets a NON-streamed run be measured — the dense
     // mmap baseline the streamed numbers are argued against.
@@ -748,6 +756,7 @@ std::unique_ptr<Session> Session::open(const SessionConfig & cfg,
         ri.engine_version = version();
         ri.n_threads = cfg.n_threads;
         ri.n_ctx = cfg.n_ctx;
+        ri.n_batch = cfg.n_batch;
         ri.n_ubatch = cfg.n_ubatch;
         ri.chatml = cfg.chatml;
         ri.compute_trace_layers = cfg.compute_trace_layers;

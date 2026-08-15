@@ -66,9 +66,11 @@ Cancel is distinct from a fatal streaming error, which is sticky and ends the se
 
 ## Fixed context
 
-`n_ctx` and `n_batch` are baked into the llama context at `open()`, before any prompt is known, so
-size them for the longest prompt + generation the session will serve. A request that would overflow
-`n_ctx` is rejected without tearing the session down.
+`n_ctx`, `n_batch`, and `n_ubatch` are baked into the llama context at `open()`, before any prompt is
+known. The frontends default to a 2048-token logical batch and a 512-token physical batch; both are
+capped to the configured context. Use `--batch-size` to set the prefill chunk and `--ubatch-size` to
+trade prefill throughput for resident compute-buffer memory. A request that would overflow `n_ctx`
+is rejected without tearing the session down.
 
 ## CLI and app
 

@@ -29,18 +29,18 @@ class IRouteTraceSink;
 class IComputeTraceSink;
 class IIoTraceSink;
 
-// Everything fixed for the model's lifetime — set once at open(). n_ctx and n_batch are
-// baked into the llama context at creation and cannot change per prompt, so size them for
-// the longest prompt+generation the session will serve.
+// Everything fixed for the model's lifetime — set once at open(). n_ctx, n_batch and n_ubatch are
+// baked into the llama context at creation and cannot change per prompt, so size them for the
+// longest prompt+generation the session will serve.
 struct SessionConfig {
     std::string model_path;
     int n_threads = 4;
     int n_ctx = 2048;
-    int n_batch = 512; // prefill chunk capacity; longer prompts are prefilled in n_batch slices
+    int n_batch = 2048; // prefill chunk capacity; capped at n_ctx in open()
     // Widest graph actually computed at once. 0 = follow n_batch. Sizing this down trades prefill
     // throughput for resident compute buffers, which on this engine compete with the expert cache.
     // See RunConfig::n_ubatch.
-    int n_ubatch = 0;
+    int n_ubatch = 512;
     bool chatml = false;
     // Active-expert (top-k) override applied at load via a kv_override on the arch-prefixed
     // expert_used_count key. 0 = use the model's own count. See RunConfig::n_expert_used.
@@ -59,7 +59,7 @@ struct SessionConfig {
 // The RunConfig → SessionConfig mapping, in one place. Both entry points that open a session from a
 // RunConfig — run() and the CLI's interactive loop — need it, and they used to spell it out field by
 // field. Two copies of a mapping is one copy too many: adding a field to RunConfig must not depend on
-// remembering to touch both. n_batch = n_ctx so any prompt that fits the context prefills in one batch.
+// remembering to touch both. Session::open() caps the configured batch sizes to the context.
 SessionConfig session_config_from(const RunConfig & cfg);
 
 // How a GenerateRequest::think=false request can be honoured on THIS model. Decided once at

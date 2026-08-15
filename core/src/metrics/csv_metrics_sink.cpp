@@ -31,9 +31,9 @@ public:
         std::fprintf(f_, "# engine=%s\n", r.engine_version.c_str());
         std::fprintf(f_,
                      "# model=%s arch=%s n_layer=%d n_expert=%d n_expert_used=%d threads=%d "
-                     "n_ctx=%d n_ubatch=%d chatml=%d\n",
+                     "n_ctx=%d n_ubatch=%d chatml=%d n_batch=%d\n",
                      r.model.c_str(), r.arch.c_str(), r.n_layer, r.n_expert, r.n_expert_used, r.n_threads, r.n_ctx,
-                     r.n_ubatch, r.chatml);
+                     r.n_ubatch, r.chatml, r.n_batch);
         std::fprintf(f_,
                      "# moe_stream=%d cache_mb=%d cache_auto=%d cache_floor_mb=%d cache_ceil_mb=%d "
                      "force_cache=%d load_all=%d io_threads=%d o_direct=%d overlap=%d io_two_wave=%d prefetch=%d "

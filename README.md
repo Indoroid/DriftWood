@@ -369,7 +369,8 @@ expert cache warm across requests:
 
 ```bash
 build/cli/bmoe-server -m Qwen3-30B-A3B-Q4_K_M.gguf --moe-stream \
-  --cache-mb auto --io-threads 4 -t 4 --port 8080 --host 127.0.0.1 --no-think
+  --cache-mb auto --io-threads 4 --batch-size 2048 --ubatch-size 512 \
+  -t 4 --port 8080 --host 127.0.0.1 --no-think
 ```
 
 It exposes an OpenAI-compatible REST API:
@@ -437,7 +438,7 @@ layer picks its experts for the current token, the engine fetches exactly those 
 just in time for the matmul, optionally caching the hottest ones and overlapping reads with
 compute. No llama.cpp sources are modified. The one exception is the optional `--overlap` flag,
 which needs a per-expert wait point inside the CPU MoE kernel that no public API exposes: it
-carries a single ~25-line hook, as one commit on the fork branch `bmoe/expert-ready-hook`. The
+carries a single small hook, as one commit on the fork branch `bmoe/expert-ready-hook`. The
 hook is zero-cost when unregistered, everything else builds against stock upstream, and it is
 dropped the moment upstream ships an equivalent. Design and the exact API contract:
 [docs/architecture.md](docs/architecture.md), [docs/seam.md](docs/seam.md).

@@ -1038,7 +1038,8 @@ static void print_usage(const char * argv0) {
                 "                          remote access)\n"
                 "\n"
                 "  bmoe-cli parity (model/session-wide):\n"
-                "  -n, --n-predict, -t, --threads, -c, --ctx-size, --ubatch\n"
+                "  -n, --n-predict, -t, --threads, -c, --ctx-size\n"
+                "  --batch-size N (default 2048), --ubatch-size N (default 512; --ubatch alias)\n"
                 "  --chatml, --no-think, --temp, --top-k, --top-p, --seed\n"
                 "  --progress, --session\n"
                 "  --mtp, --ngram, --draft, --mtp-p-min, --ngram-min-match\n"
@@ -1107,8 +1108,10 @@ int main(int argc, char ** argv) {
             cfg.n_threads = std::atoi(next("-t"));
         else if (a == "-c" || a == "--ctx-size")
             cfg.n_ctx = std::atoi(next("-c"));
-        else if (a == "--ubatch")
-            cfg.n_ubatch = std::atoi(next("--ubatch"));
+        else if (a == "--batch-size")
+            cfg.n_batch = std::atoi(next("--batch-size"));
+        else if (a == "--ubatch" || a == "--ubatch-size")
+            cfg.n_ubatch = std::atoi(next("--ubatch-size"));
         else if (a == "--n-expert-used")
             cfg.n_expert_used = std::atoi(next("--n-expert-used"));
         else if (a == "--temp")

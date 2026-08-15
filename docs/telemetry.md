@@ -215,7 +215,7 @@ prints just the summary lines.
 # bmoe_metrics v2
 # engine=<ver>
 # model=<file> arch=<arch> n_layer=<n> n_expert=<n> n_expert_used=<k> threads=<n>
-  n_ctx=<n> n_ubatch=<n> chatml=<0|1>
+  n_ctx=<n> n_ubatch=<n> chatml=<0|1> n_batch=<n>
 # moe_stream=<0|1> cache_mb=<n> cache_auto=<0|1> cache_floor_mb=<n> cache_ceil_mb=<n>
   force_cache=<0|1> load_all=<0|1> io_threads=<n> o_direct=<0|1> overlap=<0|1> io_two_wave=<0|1> prefetch=<n>
   route_ahead=<n> predict_prefetch=<0|1> predict_log=<0|1> predict_spec_max=<n> prefetch_sync=<0|1>
@@ -238,8 +238,8 @@ effective top-k after any override. Fields to read carefully:
   names its build after the checkout has moved on. `unknown` if the build did not define it. It sits
   on its own line so the `model=` line keeps starting with `model=`, which is how the app's CSV
   reader finds a run's name.
-- `n_ubatch` sets the compute-buffer reservation, so it moves the very memory columns below;
-  `0` means it follows `n_batch`.
+- `n_batch` is the logical prefill chunk capacity. `n_ubatch` sets the physical graph width and
+  compute-buffer reservation, so it moves the very memory columns below.
 - `predict_log=1`, `prefetch_sync=1` or `compute_trace_layers>0` mean **the run was instrumented**.
   A probed or traced run is not a benchmark run — see the warning under [Decode
   traces](#decode-traces).
