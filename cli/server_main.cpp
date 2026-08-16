@@ -801,7 +801,7 @@ struct ServerConfig {
     std::string default_reasoning_effort;
     std::string default_system_prompt;
     bool completion_chatml = false;
-    bool progress = false;
+    bool progress = true;
 };
 
 struct ServerState {

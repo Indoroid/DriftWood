@@ -1,0 +1,18 @@
+{
+	"name": "pi-driftwood",
+	"version": "0.1.0",
+	"description": "BigMoeOnEdge bmoe-server extension for pi-coding-agent",
+	"type": "module",
+	"license": "MIT",
+	"keywords": ["pi-package", "pi-extension", "BigMoeOnEdge", "bmoe-server"],
+	"pi": { "extensions": ["./index.ts"] },
+	"scripts": { "test": "node --import tsx --test tests/*.test.ts" },
+	"peerDependencies": { "@earendil-works/pi-coding-agent": "*" },
+	"peerDependenciesMeta": { "@earendil-works/pi-coding-agent": { "optional": true } },
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.84.1",
+		"tsx": "^4.20.6",
+		"typebox": "^1.0.69",
+		"typescript": "^5.9.3"
+	}
+}

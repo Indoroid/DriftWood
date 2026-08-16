@@ -7,6 +7,10 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- **pi-driftwood extension.** Added a standalone pi-coding-agent provider for the local
+  `bmoe-server`, covering model discovery, OpenAI-compatible streaming chat, reasoning,
+  tools, tool results, multi-turn history, and `/bmoe-version` without backend selection
+  or environment-variable configuration.
 - **Runtime reasoning, template, and KV controls.** `bmoe-cli`, `bmoe-cli --session`, and
   `bmoe-server` now support request-local thinking/effort; `bmoe-server` also accepts a
   template-delimited `reasoning_budget_tokens` cap; complete chat transcripts and generic
