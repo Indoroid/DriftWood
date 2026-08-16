@@ -19,6 +19,7 @@
 #include "bmoe/runtime.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +43,10 @@ struct SessionConfig {
     // See RunConfig::n_ubatch.
     int n_ubatch = 512;
     bool chatml = false;
+    std::string chat_template;
+    KvCacheType cache_type_k = KvCacheType::F16;
+    KvCacheType cache_type_v = KvCacheType::F16;
+    FlashAttentionMode flash_attention = FlashAttentionMode::Auto;
     // Active-expert (top-k) override applied at load via a kv_override on the arch-prefixed
     // expert_used_count key. 0 = use the model's own count. See RunConfig::n_expert_used.
     int n_expert_used = 0;
@@ -118,6 +123,13 @@ struct GenerateRequest {
     bool chatml = true;
     int n_predict = 32;
     bool think = true;
+    std::string reasoning_effort;
+    // -1 leaves reasoning unlimited. A non-negative value limits tokens in the template's
+    // reasoning span without consuming the answer's n_predict allowance.
+    int reasoning_budget_tokens = -1;
+    // Values must be serialized JSON literals (for example, "true" or "\"fast\"") because
+    // llama.cpp parses each value before exposing it to the Jinja context.
+    std::map<std::string, std::string> chat_template_kwargs;
     bool clear_kv = true;
     // HTTP callers can override sampling per request without reopening the model. Ordinary callers
     // leave this false and retain the SessionConfig sampling chain.

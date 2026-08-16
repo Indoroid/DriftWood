@@ -13,7 +13,11 @@ SessionConfig session_config_from(const RunConfig & cfg) {
     sc.n_ctx = cfg.n_ctx;
     sc.n_batch = cfg.n_batch;
     sc.n_ubatch = cfg.n_ubatch;
-    sc.chatml = cfg.chatml;
+    sc.chatml = cfg.chatml || !cfg.chat_template.empty() || !cfg.system_prompt.empty();
+    sc.chat_template = cfg.chat_template;
+    sc.cache_type_k = cfg.cache_type_k;
+    sc.cache_type_v = cfg.cache_type_v;
+    sc.flash_attention = cfg.flash_attention;
     sc.n_expert_used = cfg.n_expert_used; // active-expert (top-k) override; 0 = model default
     sc.compute_trace_layers = cfg.compute_trace_layers;
     sc.sampling = cfg.sampling; // greedy by default; opt-in stochastic decoding
@@ -53,6 +57,11 @@ RunResult run(const RunConfig & cfg,
     req.prompt = cfg.prompt;
     req.n_predict = cfg.n_predict;
     req.think = cfg.think;
+    req.reasoning_effort = cfg.reasoning_effort;
+    if (!cfg.system_prompt.empty()) {
+        req.chatml = true;
+        req.messages = {{"system", cfg.system_prompt}, {"user", cfg.prompt}};
+    }
     req.clear_kv = true;
     // Only --progress reads the per-token parsed answer; the plain path writes `piece` as it goes,
     // and a benchmark run reads neither. Building it re-parses the whole generation every token, so

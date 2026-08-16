@@ -215,7 +215,8 @@ prints just the summary lines.
 # bmoe_metrics v2
 # engine=<ver>
 # model=<file> arch=<arch> n_layer=<n> n_expert=<n> n_expert_used=<k> threads=<n>
-  n_ctx=<n> n_ubatch=<n> chatml=<0|1> n_batch=<n>
+  n_ctx=<n> n_ubatch=<n> chatml=<0|1> n_batch=<n> cache_type_k=<type> cache_type_v=<type>
+  flash_attention=<auto|on|off> custom_chat_template=<0|1>
 # moe_stream=<0|1> cache_mb=<n> cache_auto=<0|1> cache_floor_mb=<n> cache_ceil_mb=<n>
   force_cache=<0|1> load_all=<0|1> io_threads=<n> o_direct=<0|1> overlap=<0|1> io_two_wave=<0|1> prefetch=<n>
   route_ahead=<n> predict_prefetch=<0|1> predict_log=<0|1> predict_spec_max=<n> prefetch_sync=<0|1>
@@ -247,6 +248,8 @@ effective top-k after any override. Fields to read carefully:
   not reproducible except through `seed`.
 - `load_all=1` reads the whole expert set, so its `read_bytes` means something different from a
   selective run's.
+- `cache_type_k`, `cache_type_v`, `flash_attention`, and `custom_chat_template` identify the
+  session's context allocation and template source; quantized V cache requires Flash Attention.
 - `mtp=1` means the run used the model's MTP head to draft and verified a whole group per decode.
   No weight is skipped and nothing is approximated, but the text is **not** guaranteed identical to
   an unspeculated greedy run: a verify decode is a wide batch, and batch width moves the last bits on
@@ -426,11 +429,13 @@ Requests (stdin):
 
 ```
 {"cmd":"generate","id":<int>,"prompt":"<string>","n_predict":<int>,"think":<bool>,"clear_kv":<bool>}
+{"cmd":"generate","id":<int>,"messages":[{"role":"system","content":"..."},{"role":"user","content":"..."}],"reasoning_effort":"high","chat_template_kwargs":{"foo":true}}
 {"cmd":"cancel"}          # interrupt the in-flight generation; the session stays loaded
 {"cmd":"close"}           # end the session (EOF on stdin does the same)
 ```
 
-`prompt` is JSON-escaped (newlines as `\n`); `n_predict`/`think`/`clear_kv` are optional and
+`prompt` is JSON-escaped (newlines as `\n`); use exactly one of `prompt` or `messages`.
+`n_predict`/`think`/`clear_kv` are optional and
 default to the process's flags / `true`. `clear_kv:true` starts a **new chat** (drops the KV and
 the engine-held conversation); `clear_kv:false` **continues** the conversation — send only the new
 user message, the engine re-renders the whole history and reuses the KV prefix (see
@@ -440,7 +445,8 @@ Responses (stdout):
 
 ```
 BMOE_READY {"load_s":<float>,"arch":"<string>","n_ctx":<int>,
-            "think_ctl":"template|prefill|none","n_expert_used":<int>}  # once, after the model loads
+            "think_ctl":"template|prefill|none","reasoning_effort":true,
+            "n_expert_used":<int>}  # once, after the model loads
 BMOE_BEGIN {"id":<int>}                                                # a generation started
 BMOE_LOAD / BMOE_PROGRESS ...                                          # per token, as above
 BMOE_DONE  {"id":<int>,"cancelled":<bool>,"tokens":<int>,"tok_s":<float>,

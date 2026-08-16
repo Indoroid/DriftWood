@@ -18,7 +18,9 @@
 // reasoning parsing. See the note in the root CMakeLists / docs/seam.md.
 #include "chat.h"
 #include "common.h"
+#include "sampling.h"
 #include "speculative.h"
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -88,6 +90,30 @@ llama_token argmax(const float * logits, int n_vocab) {
             best = v;
         }
     return best;
+}
+
+ggml_type to_ggml_type(KvCacheType type) {
+    switch (type) {
+    case KvCacheType::F32: return GGML_TYPE_F32;
+    case KvCacheType::F16: return GGML_TYPE_F16;
+    case KvCacheType::BF16: return GGML_TYPE_BF16;
+    case KvCacheType::Q8_0: return GGML_TYPE_Q8_0;
+    case KvCacheType::Q5_0: return GGML_TYPE_Q5_0;
+    case KvCacheType::Q5_1: return GGML_TYPE_Q5_1;
+    case KvCacheType::Q4_0: return GGML_TYPE_Q4_0;
+    case KvCacheType::Q4_1: return GGML_TYPE_Q4_1;
+    case KvCacheType::IQ4_NL: return GGML_TYPE_IQ4_NL;
+    }
+    return GGML_TYPE_F16;
+}
+
+llama_flash_attn_type to_flash_attn(FlashAttentionMode mode) {
+    switch (mode) {
+    case FlashAttentionMode::Auto: return LLAMA_FLASH_ATTN_TYPE_AUTO;
+    case FlashAttentionMode::Enabled: return LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    case FlashAttentionMode::Disabled: return LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    }
+    return LLAMA_FLASH_ATTN_TYPE_AUTO;
 }
 
 // The generation phase's running measurement state, and the one place a generated token's cost is
@@ -472,13 +498,16 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
 
     // Chat templates are model-bound: initialise once here, apply per prompt in generate().
     if (cfg.chatml) {
+        if (!cfg.chat_template.empty() && !common_chat_verify_template(cfg.chat_template, true))
+            return fail("invalid custom chat template");
         try {
-            im.chat_tmpls = common_chat_templates_init(model, "");
+            im.chat_tmpls = common_chat_templates_init(model, cfg.chat_template);
             im.chat_on = true;
             // Which "thinking off" mechanism this template supports is a property of the model, so
             // it is settled once here rather than re-derived on every turn.
             im.think_ctl = detail::probe_think_control(im.chat_tmpls.get());
         } catch (const std::exception & e) {
+            if (!cfg.chat_template.empty()) return fail(std::string("custom chat template failed: ") + e.what());
             std::fprintf(stderr, "bmoe: chat template unavailable (%s); using raw prompts\n", e.what());
             im.chat_on = false;
         }
@@ -503,6 +532,9 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     // buffers — the memory this engine is always short of. 0 keeps the historical behaviour
     // (one graph as wide as the batch); a smaller value chunks prefill to buy that memory back.
     cparams.n_ubatch = std::min<uint32_t>((uint32_t) cfg.n_ubatch, cparams.n_batch);
+    cparams.type_k = to_ggml_type(cfg.cache_type_k);
+    cparams.type_v = to_ggml_type(cfg.cache_type_v);
+    cparams.flash_attn_type = to_flash_attn(cfg.flash_attention);
     // The streamer needs the callback to see routing; the compute trace needs it to time nodes.
     // Installing it for the trace alone is what lets a NON-streamed run be measured — the dense
     // mmap baseline the streamed numbers are argued against.
@@ -516,7 +548,10 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     if (cfg.spec.enabled()) cparams.n_rs_seq = (uint32_t) cfg.spec.draft_max;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
-    if (!ctx) return fail("failed to create context");
+    if (!ctx)
+        return fail("failed to create context (cache-type-k=" + std::string(kv_cache_type_name(cfg.cache_type_k)) +
+                    ", cache-type-v=" + kv_cache_type_name(cfg.cache_type_v) +
+                    ", flash-attn=" + flash_attention_mode_name(cfg.flash_attention) + ")");
     im.ctx.reset(ctx);
     llama_set_n_threads(ctx, cfg.n_threads, cfg.n_threads);
 
@@ -540,7 +575,11 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
         dparams.n_ubatch = (uint32_t) std::max(cfg.spec.draft_max + 1, mtp_draft_ubatch);
         if (dparams.n_ubatch > cparams.n_ubatch) dparams.n_ubatch = cparams.n_ubatch;
         llama_context * ctx_dft = llama_init_from_model(model, dparams);
-        if (!ctx_dft) return fail("failed to create the MTP draft context");
+        if (!ctx_dft)
+            return fail("failed to create the MTP draft context (cache-type-k=" +
+                        std::string(kv_cache_type_name(cfg.cache_type_k)) +
+                        ", cache-type-v=" + kv_cache_type_name(cfg.cache_type_v) +
+                        ", flash-attn=" + flash_attention_mode_name(cfg.flash_attention) + ")");
         im.ctx_dft.reset(ctx_dft);
         llama_set_n_threads(ctx_dft, cfg.n_threads, cfg.n_threads);
     }
@@ -759,6 +798,10 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
         ri.n_batch = cfg.n_batch;
         ri.n_ubatch = cfg.n_ubatch;
         ri.chatml = cfg.chatml;
+        ri.cache_type_k = kv_cache_type_name(cfg.cache_type_k);
+        ri.cache_type_v = kv_cache_type_name(cfg.cache_type_v);
+        ri.flash_attention = flash_attention_mode_name(cfg.flash_attention);
+        ri.custom_chat_template = !cfg.chat_template.empty();
         ri.compute_trace_layers = cfg.compute_trace_layers;
         ri.spec = cfg.spec.is_mtp() ? "mtp" : cfg.spec.is_ngram() ? "ngram" : "off";
         ri.spec_draft_max = cfg.spec.enabled() ? cfg.spec.draft_max : 0;
@@ -905,7 +948,16 @@ RunResult Session::generate(const GenerateRequest & req,
     std::vector<common_chat_msg> prior_history;
     bool prefilled_answer = false; // closed the reasoning span in the prompt, so skip reasoning parse
     common_chat_parser_params parse_params;
+    common_chat_params chat_params;
     if (chat_on) {
+        for (const auto & [key, value] : req.chat_template_kwargs) {
+            if (key.empty()) return fail("chat_template_kwargs contains an empty key");
+            if (key.size() > 128) return fail("chat_template_kwargs keys must be 1..128 bytes");
+            if (nlohmann::json::parse(value, nullptr, false).is_discarded())
+                return fail("chat_template_kwargs['" + key + "'] is not valid JSON");
+        }
+        if (req.reasoning_effort.size() > 64)
+            return fail("reasoning_effort must be at most 64 bytes");
         try {
             if (!req.messages.empty()) {
                 prior_history = im.chat_history;
@@ -964,6 +1016,11 @@ RunResult Session::generate(const GenerateRequest & req,
             // here, before apply — the field defaults to NONE, which produces a content-only
             // grammar that leaves <think> markers in the answer no matter how the parse is wired.
             inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+            inputs.chat_template_kwargs = req.chat_template_kwargs;
+            inputs.chat_template_kwargs.erase("enable_thinking");
+            inputs.chat_template_kwargs.erase("reasoning_effort");
+            if (req.think && !req.reasoning_effort.empty())
+                inputs.chat_template_kwargs["reasoning_effort"] = nlohmann::json(req.reasoning_effort).dump();
 
             // Many templates never read enable_thinking (LFM2.5 among them): the flag reaches the
             // jinja context, is discarded, and the model reasons anyway — the setting silently does
@@ -978,11 +1035,10 @@ RunResult Session::generate(const GenerateRequest & req,
                 prefilled_answer = true;
             }
 
-            common_chat_params cp = common_chat_templates_apply(im.chat_tmpls.get(), inputs);
-            prompt = cp.prompt;
-            parse_params = detail::build_parse_params(cp);
+            chat_params = common_chat_templates_apply(im.chat_tmpls.get(), inputs);
+            prompt = chat_params.prompt;
+            parse_params = detail::build_parse_params(chat_params);
         } catch (const std::exception & e) {
-            std::fprintf(stderr, "bmoe: chat template apply failed (%s); using raw prompt\n", e.what());
             if (history_pushed) {
                 im.chat_history.pop_back();
                 history_pushed = false;
@@ -991,8 +1047,34 @@ RunResult Session::generate(const GenerateRequest & req,
                 im.chat_history = std::move(prior_history);
                 history_replaced = false;
             }
+            if (!im.cfg.chat_template.empty()) return fail(std::string("chat template apply failed: ") + e.what());
+            std::fprintf(stderr, "bmoe: chat template apply failed (%s); using raw prompt\n", e.what());
             chat_on = false;
         }
+    }
+
+    common_sampler_ptr reasoning_sampler;
+    if (req.reasoning_budget_tokens >= 0) {
+        if (!chat_on)
+            return fail("reasoning_budget_tokens requires a chat template");
+        if (chat_params.thinking_start_tag.empty() || chat_params.thinking_end_tags.empty())
+            return fail("model chat template does not expose reasoning delimiters");
+
+        common_params_sampling params;
+        const SamplingConfig & sampling = req.override_sampling ? req.sampling : im.cfg.sampling;
+        params.seed = sampling.seed;
+        params.top_k = sampling.top_k;
+        params.top_p = sampling.top_p;
+        params.min_keep = 1;
+        params.temp = sampling.temp;
+        params.samplers = {COMMON_SAMPLER_TYPE_TOP_K, COMMON_SAMPLER_TYPE_TOP_P, COMMON_SAMPLER_TYPE_TEMPERATURE};
+        params.reasoning_budget_tokens = req.reasoning_budget_tokens;
+        params.generation_prompt = chat_params.generation_prompt;
+        params.reasoning_budget_start = common_tokenize(im.vocab, chat_params.thinking_start_tag, false, true);
+        for (const std::string & tag : chat_params.thinking_end_tags)
+            params.reasoning_budget_end.push_back(common_tokenize(im.vocab, tag, false, true));
+        params.reasoning_budget_forced = params.reasoning_budget_end.front();
+        reasoning_sampler.reset(common_sampler_init(im.model.get(), params));
     }
 
     std::vector<llama_token> tokens(prompt.size() + 8);
@@ -1142,7 +1224,9 @@ RunResult Session::generate(const GenerateRequest & req,
     // head", which is the only thing that needs the second context and llama.cpp's `common`
     // speculative driver. Conflating them is what would make the n-gram source pay for a draft
     // context it never uses.
-    const bool spec_on = im.cfg.spec.enabled();
+    // The budget sampler has to see every sampled token, while speculative verification accepts a
+    // batch at once. Keep the draft context in sync, but decode budgeted requests one token at a time.
+    const bool spec_on = im.cfg.spec.enabled() && !reasoning_sampler;
     const bool mtp_on = im.mtp != nullptr;
     for (int i = (int) n_common; i < n_prompt; i += im.cfg.n_batch) {
         const int chunk = std::min(im.cfg.n_batch, n_prompt - i);
@@ -1246,7 +1330,8 @@ RunResult Session::generate(const GenerateRequest & req,
     // to the resident reference the gates check); with a sampling chain, draw from the context's
     // last-position logits, which llama_sampler_sample reads at index -1 — the same logits argmax
     // would have read.
-    llama_token tok = im.smpl ? llama_sampler_sample(im.smpl, ctx, -1) : argmax(logits, im.n_vocab);
+    llama_token tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler.get(), ctx, -1)
+                                        : im.smpl ? llama_sampler_sample(im.smpl, ctx, -1) : argmax(logits, im.n_vocab);
 
     while (n_gen < req.n_predict) {
         if (llama_vocab_is_eog(im.vocab, tok)) break;
@@ -1340,6 +1425,8 @@ RunResult Session::generate(const GenerateRequest & req,
             if (moe.overlap && im.source.fatal()) return fail("expert stream I/O failed during overlap decode");
             return fail("decode failed during generation");
         }
+        if (!spec_on && mtp_on && !common_speculative_process(im.mtp.get(), step))
+            return fail("MTP draft context failed to process the budgeted decode");
         trace_flush(); // outside the s0..s1 bracket: the trace's own writes must not bill wall_ms
         ++im.mtp_decodes;
 
@@ -1430,6 +1517,7 @@ RunResult Session::generate(const GenerateRequest & req,
             int np = llama_token_to_piece(im.vocab, out, piece, sizeof(piece), 0, true);
             std::string delta = np > 0 ? std::string(piece, np) : std::string();
             gen += delta;
+            if (reasoning_sampler) common_sampler_accept(reasoning_sampler.get(), out, /*is_generated*/ true);
             if (chat_on) im.kv_tokens.push_back(out); // this token is now in the KV
             if (spec_on) mtp_ctx.push_back(out);
             ++n_gen;
@@ -1467,7 +1555,8 @@ RunResult Session::generate(const GenerateRequest & req,
         n_past += 1 + n_acc;
         const int32_t row = wide ? n_acc : -1;
         logits = llama_get_logits_ith(ctx, row);
-        tok = im.smpl ? llama_sampler_sample(im.smpl, ctx, row) : argmax(logits, im.n_vocab);
+        tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler.get(), ctx, row)
+                                : im.smpl ? llama_sampler_sample(im.smpl, ctx, row) : argmax(logits, im.n_vocab);
     }
 
     // Speculation can leave the KV ahead of what the caller received: an accepted end-of-generation

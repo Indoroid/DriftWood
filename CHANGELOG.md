@@ -7,6 +7,11 @@ Semantic Versioning.
 ## [Unreleased]
 
 ### Added
+- **Runtime reasoning, template, and KV controls.** `bmoe-cli`, `bmoe-cli --session`, and
+  `bmoe-server` now support request-local thinking/effort; `bmoe-server` also accepts a
+  template-delimited `reasoning_budget_tokens` cap; complete chat transcripts and generic
+  JSON `chat_template_kwargs`, startup custom templates, and session-scoped KV-cache types with
+  Flash Attention selection. Existing flags and request shapes remain valid.
 - **`bmoe-server` — HTTP server mode.** A new `bmoe-server` binary (alongside `bmoe-cli`) that
   loads a model once and serves it over HTTP on a configurable port. Exposes an OpenAI-compatible
   REST API: `GET /v1/models`, `POST /v1/completions`, and `POST /v1/chat/completions`, with

@@ -1,9 +1,73 @@
 #include "bmoe/config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <utility>
 
 namespace bmoe {
+
+namespace {
+
+std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+} // namespace
+
+const char * kv_cache_type_name(KvCacheType type) {
+    switch (type) {
+    case KvCacheType::F32: return "f32";
+    case KvCacheType::F16: return "f16";
+    case KvCacheType::BF16: return "bf16";
+    case KvCacheType::Q8_0: return "q8_0";
+    case KvCacheType::Q5_0: return "q5_0";
+    case KvCacheType::Q5_1: return "q5_1";
+    case KvCacheType::Q4_0: return "q4_0";
+    case KvCacheType::Q4_1: return "q4_1";
+    case KvCacheType::IQ4_NL: return "iq4_nl";
+    }
+    return "f16";
+}
+
+const char * flash_attention_mode_name(FlashAttentionMode mode) {
+    switch (mode) {
+    case FlashAttentionMode::Auto: return "auto";
+    case FlashAttentionMode::Enabled: return "on";
+    case FlashAttentionMode::Disabled: return "off";
+    }
+    return "auto";
+}
+
+bool parse_kv_cache_type(const std::string & value, KvCacheType & out) {
+    const std::string v = lower(value);
+    KvCacheType parsed;
+    if (v == "f32") parsed = KvCacheType::F32;
+    else if (v == "f16") parsed = KvCacheType::F16;
+    else if (v == "bf16") parsed = KvCacheType::BF16;
+    else if (v == "q8_0") parsed = KvCacheType::Q8_0;
+    else if (v == "q5_0") parsed = KvCacheType::Q5_0;
+    else if (v == "q5_1") parsed = KvCacheType::Q5_1;
+    else if (v == "q4_0") parsed = KvCacheType::Q4_0;
+    else if (v == "q4_1") parsed = KvCacheType::Q4_1;
+    else if (v == "iq4_nl") parsed = KvCacheType::IQ4_NL;
+    else return false;
+    out = parsed;
+    return true;
+}
+
+bool parse_flash_attention_mode(const std::string & value, FlashAttentionMode & out) {
+    const std::string v = lower(value);
+    FlashAttentionMode parsed;
+    if (v == "auto") parsed = FlashAttentionMode::Auto;
+    else if (v == "on") parsed = FlashAttentionMode::Enabled;
+    else if (v == "off") parsed = FlashAttentionMode::Disabled;
+    else return false;
+    out = parsed;
+    return true;
+}
 
 ValidationResult validate(const RunConfig & cfg) {
     ValidationResult r;
@@ -36,6 +100,14 @@ ValidationResult validate(const RunConfig & cfg) {
     // is available — same rationale as the streaming checks that stay out of this pure path.
     if (cfg.n_expert_used < 0) {
         return fail("n_expert_used must be >= 0 (0 = model default)");
+    }
+    if (!cfg.think && !cfg.reasoning_effort.empty() && lower(cfg.reasoning_effort) != "none") {
+        return fail("reasoning_effort requires thinking to be enabled (use 'none' to disable reasoning)");
+    }
+    if (cfg.reasoning_effort.size() > 64) return fail("reasoning_effort must be at most 64 bytes");
+    if (cfg.cache_type_v != KvCacheType::F32 && cfg.cache_type_v != KvCacheType::F16 &&
+        cfg.cache_type_v != KvCacheType::BF16 && cfg.flash_attention == FlashAttentionMode::Disabled) {
+        return fail("quantized V cache requires Flash Attention; use auto/on or choose an unquantized V cache type");
     }
 
     // Sampling ranges are enforced only when sampling is actually on (temp > 0). With temp <= 0

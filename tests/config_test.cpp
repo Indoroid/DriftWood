@@ -50,7 +50,37 @@ static void expect_fail(const char * name, const RunConfig & c) {
     }
 }
 
+static void expect_true(const char * name, bool value) {
+    if (value)
+        std::printf("[PASS] %s\n", name);
+    else {
+        std::printf("[FAIL] %s\n", name);
+        ++failures;
+    }
+}
+
 int main() {
+    {
+        KvCacheType type = KvCacheType::Q4_0;
+        expect_true("KV type parse is case-insensitive", parse_kv_cache_type("F16", type) && type == KvCacheType::F16);
+        expect_true("KV type names are canonical", std::string(kv_cache_type_name(KvCacheType::IQ4_NL)) == "iq4_nl");
+        expect_true("flash mode parse is case-insensitive", [&] {
+            FlashAttentionMode mode = FlashAttentionMode::Auto;
+            return parse_flash_attention_mode("OFF", mode) && mode == FlashAttentionMode::Disabled;
+        }());
+        expect_true("unknown KV type leaves output unchanged", [&] {
+            type = KvCacheType::Q4_0;
+            return !parse_kv_cache_type("nope", type) && type == KvCacheType::Q4_0;
+        }());
+    }
+    {
+        RunConfig c = ok_base();
+        c.cache_type_v = KvCacheType::Q4_0;
+        c.flash_attention = FlashAttentionMode::Disabled;
+        expect_fail("quantized V requires Flash Attention", c);
+        c.flash_attention = FlashAttentionMode::Auto;
+        expect_ok("quantized V with auto Flash Attention", c);
+    }
     // Baseline and the pre-existing scalar rules.
     expect_ok("valid minimal config", ok_base());
     {

@@ -52,6 +52,7 @@ recorded in the demo app on a 12 GB phone, real time, not sped up.</em></p>
 - [Supported models](#supported-models)
 - [Benchmarks](#benchmarks)
 - [Quickstart](#quickstart)
+- [Sessions and telemetry](#sessions-and-telemetry)
 - [How it works](#how-it-works)
 - [Documentation](#documentation)
 - [Prior art](#prior-art)
@@ -151,10 +152,25 @@ task before relying on it.
 
 ### Sessions and telemetry
 
-The model stays loaded across chat turns, and every run can account for its own time: `--progress`
-breaks each token into flash I/O, cache management and compute, next to the cache hit rate and
-bytes read, and `--csv` adds the memory picture those numbers must be read against. The Android
-app renders the same feed live while you chat. More under [Telemetry](#telemetry).
+The model stays loaded across chat turns, and the expert cache stays warm between requests. Use
+`--session` for a persistent stdin/stdout JSON-lines process:
+
+```bash
+build/cli/bmoe-cli -m Qwen3-30B-A3B-Q4_K_M.gguf --moe-stream --session \
+  --cache-mb auto --cache-ceil-mb 4000 --io-threads 4 --chatml
+```
+
+Send independent prompts with `clear_kv: true`, or continue a model-owned chat with
+`clear_kv: false`. Requests may also provide a complete `messages` transcript, `think`,
+`reasoning_effort`, and JSON `chat_template_kwargs`; cancellation keeps the loaded model and cache
+usable. The session reports separate reasoning and answer text in its `BMOE_*` responses, and
+`BMOE_DONE` reports prefill, context, cache, and generation totals. See
+[session.md](docs/session.md) for the protocol and KV-prefix reuse details.
+
+Every run can account for its own time: `--progress` breaks each token into flash I/O, cache
+management and compute, next to the cache hit rate and bytes read, and `--csv` adds the memory
+picture those numbers must be read against. The Android app renders the same feed live while you
+chat. More under [Telemetry](#telemetry).
 
 ### Android demo app
 
@@ -398,8 +414,23 @@ and diagnostic option is accepted by the server, including CSV/route/compute/I/O
 `--session` is accepted as a no-op because the server is always persistent. `--progress` preserves
 the CLI's stdout telemetry alongside HTTP/SSE responses; request bodies replace `--prompt`. Chat
 requests always use the model template. Raw `/v1/completions` stay raw unless the
-server was started with `--chatml`, matching the CLI flag exactly. `--no-think` disables model
-thinking where the model template supports it.
+server was started with `--chatml`, matching the CLI flag exactly. `--no-think` sets the server's
+default; each request may override it with `think` or `reasoning_effort`.
+
+Runtime controls split by lifetime. Request-hot controls are `think`, `reasoning_effort`,
+`reasoning_budget_tokens`, complete chat messages (including system prompts), `chat_template_kwargs`,
+sampling, and `n_predict`. Session controls are the custom chat template and KV allocation settings:
+
+~~~text
+--chat-template-file template.jinja
+--cache-type-k q8_0 --cache-type-v q8_0 --flash-attn auto
+~~~
+
+Quantized V cache requires Flash Attention. Reasoning effort is template/model dependent: passing
+`high` requests that value but does not guarantee a distinct model behavior. A chat request may set
+`"reasoning_budget_tokens": N` (`"thinking_budget_tokens"` is an alias): `0` ends the template's
+reasoning span immediately, a positive value caps its generated tokens, and `-1` or omission leaves
+it unlimited. The budget never reduces `max_completion_tokens` for the final answer.
 
 Build-tree binaries use an origin-relative runtime library path, so an extracted or moved build can
 run `build/cli/bmoe-server` directly without setting `LD_LIBRARY_PATH`.
@@ -415,6 +446,13 @@ python3 scripts/test-lfm25-server.py \
   --out-dir build/lfm25-live -- \
   --moe-stream --cache-mb 0 --no-odirect --progress
 ```
+
+The server and session frontends share the same model, sampling, streaming, cache, speculation,
+prediction, and diagnostic controls. Session-scoped context settings include custom Jinja chat
+templates, `--cache-type-k`, `--cache-type-v`, and `--flash-attn`; request-scoped controls include
+the full chat transcript, thinking/effort, template kwargs, sampling, and token limits. Quantized
+V cache requires Flash Attention. See [session.md](docs/session.md) and
+[telemetry.md](docs/telemetry.md) for the persistent-process contracts.
 
 Platform status: Linux is exercised by CI (build + gates) and Windows is where the
 [desktop numbers](#desktop) were measured. On Windows, build with CMake directly (Visual Studio

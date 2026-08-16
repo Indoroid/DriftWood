@@ -100,8 +100,10 @@ library for two things: rendering the model's own chat template and parsing reas
 (with `--mtp`) driving speculative decoding.
 `common_chat_templates_init` / `common_chat_templates_apply` run the real Jinja template the
 gguf ships (so Gemma's channel format, Qwen ChatML, etc. all format correctly, driven by the
-model rather than hardcoded), and `common_chat_parse` extracts a reasoning model's thinking so
-it can be reported apart from the answer. The parser-params wiring lives in its own translation
+model rather than hardcoded), `common_chat_parse` extracts a reasoning model's thinking, and
+`common_sampler` applies a request-local reasoning-token budget using those template-derived
+delimiters, so neither markers nor the forced closing sequence are hardcoded and thinking can be
+reported apart from the answer. The parser-params wiring lives in its own translation
 unit, `chat_parse.cpp` — the PEG parser arena has to be loaded explicitly or `common_chat_parse`
 throws on the first token, which is how issue #49 stayed invisible; keeping it separate makes
 that seam unit-testable without a model.

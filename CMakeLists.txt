@@ -37,10 +37,11 @@ option(BMOE_BUILD_TOOLS "Build standalone diagnostic tools (bmoe-iobench)" OFF)
 
 # --- Optional native dependency: llama.cpp ----------------------------------------
 # The streaming seam uses only the public C API (llama.h). We additionally link llama.cpp's
-# `common` layer for one thing: chat-template rendering + reasoning parsing (common_chat_*),
-# so prompt formatting and thinking-extraction are template-driven per model instead of
-# hardcoded. Unlike the streaming seam, `common` is NOT a stable API — it can change between
-# upstream versions, so a submodule bump may need the chat glue in runtime.cpp updated (the
+# `common` layer for chat-template rendering, reasoning parsing, and its template-delimited
+# reasoning-budget sampler, so prompt formatting, thinking extraction, and budget end markers are
+# template-driven per model instead of hardcoded. Unlike the streaming seam, `common` is NOT a
+# stable API — it can change between upstream versions, so a submodule bump may need the chat glue
+# in runtime.cpp updated (the
 # gates catch it at build time). That trade-off is deliberate; see docs/seam.md.
 set(BMOE_HAVE_LLAMA OFF)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp/CMakeLists.txt")

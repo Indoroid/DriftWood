@@ -46,6 +46,10 @@ if(UNIX)
     add_executable(bmoe_server_api_test server_api_test.cpp)
     target_link_libraries(bmoe_server_api_test PRIVATE bmoe_core)
 add_test(NAME server_api COMMAND bmoe_server_api_test)
+
+add_executable(bmoe_session_cli_test session_cli_test.cpp)
+target_link_libraries(bmoe_session_cli_test PRIVATE bmoe_core)
+add_test(NAME session_cli COMMAND bmoe_session_cli_test)
 endif()
 
 find_program(PYTHON3 NAMES python3 python)

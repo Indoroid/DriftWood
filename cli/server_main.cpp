@@ -34,9 +34,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -56,6 +59,25 @@ using json = nlohmann::json;
 static std::string json_escape(const std::string & s) {
     std::string quoted = json(s).dump(-1, ' ', false, json::error_handler_t::replace);
     return quoted.size() >= 2 ? quoted.substr(1, quoted.size() - 2) : std::string{};
+}
+
+static bool read_text_file(const std::string & path, std::string & out, std::string & error) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error = "cannot read " + path;
+        return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return true;
+}
+
+static std::string normalize_reasoning_effort(std::string value) {
+    std::string lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (lower == "low" || lower == "medium" || lower == "high" || lower == "none") return lower;
+    return value;
 }
 
 struct ProgressDelta {
@@ -319,6 +341,10 @@ struct ApiCompletionRequest {
     int n_predict = 128;
     bool stream = false;
     SamplingConfig sampling;
+    std::optional<bool> think;
+    std::string reasoning_effort;
+    std::optional<int> reasoning_budget_tokens;
+    std::map<std::string, std::string> chat_template_kwargs;
 };
 
 static bool parse_message_content(const json & value, std::string & out) {
@@ -342,6 +368,59 @@ static bool parse_message_content(const json & value, std::string & out) {
     return true;
 }
 
+static bool parse_chat_template_kwargs(const json & value, ApiCompletionRequest & out, std::string & error) {
+    if (!value.is_object()) {
+        error = "chat_template_kwargs must be an object";
+        return false;
+    }
+    std::optional<bool> generic_think;
+    std::optional<std::string> generic_effort;
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        if (it.key().empty() || it.key().size() > 128) {
+            error = "chat_template_kwargs keys must be 1..128 bytes";
+            return false;
+        }
+        if (it.key() == "enable_thinking") {
+            if (!it.value().is_boolean()) {
+                error = "chat_template_kwargs.enable_thinking must be a boolean";
+                return false;
+            }
+            generic_think = it.value().get<bool>();
+        } else if (it.key() == "reasoning_effort") {
+            if (!it.value().is_string()) {
+                error = "chat_template_kwargs.reasoning_effort must be a string";
+                return false;
+            }
+            generic_effort = normalize_reasoning_effort(it.value().get<std::string>());
+            if (generic_effort->empty()) {
+                error = "chat_template_kwargs.reasoning_effort must be non-empty";
+                return false;
+            }
+        } else {
+            out.chat_template_kwargs[it.key()] = it.value().dump();
+        }
+    }
+    if (generic_think) {
+        if (out.think && *out.think != *generic_think) {
+            error = "Conflicting thinking controls: think and chat_template_kwargs.enable_thinking disagree";
+            return false;
+        }
+        out.think = *generic_think;
+    }
+    if (generic_effort) {
+        if (!out.reasoning_effort.empty() && out.reasoning_effort != *generic_effort) {
+            error = "Conflicting reasoning_effort controls";
+            return false;
+        }
+        out.reasoning_effort = *generic_effort;
+    }
+    if (out.reasoning_effort.size() > 64) {
+        error = "reasoning_effort must be at most 64 bytes";
+        return false;
+    }
+    return true;
+}
+
 static bool parse_completion_request(const std::string & body,
                                      bool chat,
                                      const SamplingConfig & defaults,
@@ -357,6 +436,45 @@ static bool parse_completion_request(const std::string & body,
     out = {};
     out.sampling = defaults;
     out.n_predict = default_n_predict;
+    if (root.contains("think")) {
+        if (!root["think"].is_boolean()) {
+            error = "think must be a boolean";
+            return false;
+        }
+        out.think = root["think"].get<bool>();
+    }
+    if (root.contains("reasoning_effort")) {
+        if (!root["reasoning_effort"].is_string() || root["reasoning_effort"].get<std::string>().empty()) {
+            error = "reasoning_effort must be a non-empty string";
+            return false;
+        }
+        out.reasoning_effort = normalize_reasoning_effort(root["reasoning_effort"].get<std::string>());
+    }
+    for (const char * name : {"reasoning_budget_tokens", "thinking_budget_tokens"}) {
+        if (!root.contains(name)) continue;
+        const json & value = root[name];
+        if (!value.is_number_integer() || value.get<long long>() < -1 ||
+            value.get<long long>() > std::numeric_limits<int>::max()) {
+            error = std::string(name) + " must be an integer in -1.." +
+                    std::to_string(std::numeric_limits<int>::max());
+            return false;
+        }
+        const int budget = value.get<int>();
+        if (out.reasoning_budget_tokens && *out.reasoning_budget_tokens != budget) {
+            error = "Conflicting reasoning budget controls";
+            return false;
+        }
+        out.reasoning_budget_tokens = budget;
+    }
+    if (root.contains("chat_template_kwargs") &&
+        !parse_chat_template_kwargs(root["chat_template_kwargs"], out, error))
+        return false;
+    if (out.reasoning_effort == "none") {
+        out.think = false;
+        out.reasoning_effort.clear();
+    } else if (out.think && !*out.think) {
+        out.reasoning_effort.clear();
+    }
     if (chat) {
         if (!root.contains("messages") || !root["messages"].is_array() || root["messages"].empty()) {
             error = "messages must be a non-empty array";
@@ -664,7 +782,8 @@ static void send_sse_done(int fd) {
 }
 
 static void send_json_error(int fd, int status, const char * msg, bool ka) {
-    std::string body = "{\"error\":{\"message\":\"" + json_escape(msg) + "\",\"type\":\"api_error\"}}";
+    const char * type = status == 400 ? "invalid_request_error" : "api_error";
+    std::string body = "{\"error\":{\"message\":\"" + json_escape(msg) + "\",\"type\":\"" + type + "\"}}";
     const char * text = status >= 500   ? "Internal Server Error"
                         : status == 400 ? "Bad Request"
                         : status == 404 ? "Not Found"
@@ -678,7 +797,9 @@ struct ServerConfig {
     std::string host = "127.0.0.1";
     int port = 8080;
     int max_connections = 32;
-    bool disable_think = false;
+    bool default_think = true;
+    std::string default_reasoning_effort;
+    std::string default_system_prompt;
     bool completion_chatml = false;
     bool progress = false;
 };
@@ -805,6 +926,12 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
     GenerateRequest greq;
     greq.prompt = std::move(api.prompt);
     greq.messages = std::move(api.messages);
+    if (chat && !state.srv_cfg.default_system_prompt.empty()) {
+        const bool has_system = std::any_of(greq.messages.begin(), greq.messages.end(), [](const ChatMessage & message) {
+            return message.role == "system";
+        });
+        if (!has_system) greq.messages.insert(greq.messages.begin(), {"system", state.srv_cfg.default_system_prompt});
+    }
     greq.tools = std::move(api.tools);
     greq.tool_choice = api.tool_choice;
     greq.parallel_tool_calls = api.parallel_tool_calls;
@@ -813,7 +940,12 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
     // OpenAI streaming needs only piece deltas. The optional CLI-compatible progress protocol needs
     // parsed cumulative text/reasoning, accepting its documented O(n²) rendering cost when enabled.
     greq.render_text = state.srv_cfg.progress;
-    greq.think = !state.srv_cfg.disable_think;
+    greq.think = api.think.value_or(!api.reasoning_effort.empty() ? true : state.srv_cfg.default_think);
+    greq.reasoning_effort = api.reasoning_effort.empty() ? state.srv_cfg.default_reasoning_effort
+                                                          : api.reasoning_effort;
+    if (!greq.think) greq.reasoning_effort.clear();
+    greq.reasoning_budget_tokens = greq.think ? api.reasoning_budget_tokens.value_or(-1) : -1;
+    greq.chat_template_kwargs = std::move(api.chat_template_kwargs);
     greq.override_sampling = true;
     greq.sampling = api.sampling;
     long created = static_cast<long>(std::time(nullptr));
@@ -1040,7 +1172,11 @@ static void print_usage(const char * argv0) {
                 "  bmoe-cli parity (model/session-wide):\n"
                 "  -n, --n-predict, -t, --threads, -c, --ctx-size\n"
                 "  --batch-size N (default 2048), --ubatch-size N (default 512; --ubatch alias)\n"
-                "  --chatml, --no-think, --temp, --top-k, --top-p, --seed\n"
+                "  --chatml, --system-prompt TEXT, --system-prompt-file PATH\n"
+                "  --no-think, --reasoning-effort VALUE\n"
+                "  --chat-template TEXT, --chat-template-file PATH\n"
+                "  --cache-type-k TYPE, --cache-type-v TYPE, --flash-attn auto|on|off\n"
+                "  --temp, --top-k, --top-p, --seed\n"
                 "  --progress, --session\n"
                 "  --mtp, --ngram, --draft, --mtp-p-min, --ngram-min-match\n"
                 "  --csv, --route-trace, --compute-trace, --compute-trace-layers, --io-trace\n"
@@ -1080,6 +1216,14 @@ int main(int argc, char ** argv) {
     std::string route_trace_path;
     std::string compute_trace_path;
     std::string io_trace_path;
+    bool no_think_seen = false;
+    bool reasoning_effort_seen = false;
+    bool system_prompt_seen = false;
+    bool system_prompt_file_seen = false;
+    std::string system_prompt_file;
+    bool chat_template_seen = false;
+    bool chat_template_file_seen = false;
+    std::string chat_template_file;
 
     std::set<std::string> seen;
 
@@ -1137,6 +1281,58 @@ int main(int argc, char ** argv) {
             cfg.spec.ngram_min_match = std::atoi(next("--ngram-min-match"));
         else if (a == "--chatml")
             srv.completion_chatml = true;
+        else if (a == "--system-prompt") {
+            if (system_prompt_file_seen) {
+                std::fprintf(stderr, "bmoe-server: --system-prompt conflicts with --system-prompt-file\n");
+                return 2;
+            }
+            cfg.system_prompt = next("--system-prompt");
+            system_prompt_seen = true;
+        } else if (a == "--system-prompt-file") {
+            if (system_prompt_seen) {
+                std::fprintf(stderr, "bmoe-server: --system-prompt conflicts with --system-prompt-file\n");
+                return 2;
+            }
+            system_prompt_file = next("--system-prompt-file");
+            system_prompt_file_seen = true;
+        }
+        else if (a == "--reasoning-effort") {
+            cfg.reasoning_effort = next("--reasoning-effort");
+            if (cfg.reasoning_effort.empty()) {
+                std::fprintf(stderr, "bmoe-server: --reasoning-effort cannot be empty\n");
+                return 2;
+            }
+            reasoning_effort_seen = true;
+        } else if (a == "--chat-template") {
+            if (chat_template_file_seen) {
+                std::fprintf(stderr, "bmoe-server: --chat-template conflicts with --chat-template-file\n");
+                return 2;
+            }
+            cfg.chat_template = next("--chat-template");
+            chat_template_seen = true;
+        } else if (a == "--chat-template-file") {
+            if (chat_template_seen) {
+                std::fprintf(stderr, "bmoe-server: --chat-template conflicts with --chat-template-file\n");
+                return 2;
+            }
+            chat_template_file = next("--chat-template-file");
+            chat_template_file_seen = true;
+        } else if (a == "--cache-type-k" || a == "-ctk") {
+            if (!parse_kv_cache_type(next("--cache-type-k"), cfg.cache_type_k)) {
+                std::fprintf(stderr, "bmoe-server: invalid --cache-type-k\n");
+                return 2;
+            }
+        } else if (a == "--cache-type-v" || a == "-ctv") {
+            if (!parse_kv_cache_type(next("--cache-type-v"), cfg.cache_type_v)) {
+                std::fprintf(stderr, "bmoe-server: invalid --cache-type-v\n");
+                return 2;
+            }
+        } else if (a == "--flash-attn") {
+            if (!parse_flash_attention_mode(next("--flash-attn"), cfg.flash_attention)) {
+                std::fprintf(stderr, "bmoe-server: --flash-attn expects auto|on|off\n");
+                return 2;
+            }
+        }
         else if (a == "--progress")
             srv.progress = true;
         else if (a == "--session") {
@@ -1144,7 +1340,7 @@ int main(int argc, char ** argv) {
             // parity so one shared option vector can launch either frontend.
         } else if (a == "--no-think") {
             cfg.think = false;
-            srv.disable_think = true;
+            no_think_seen = true;
         } else if (a == "--csv")
             csv_path = next("--csv");
         else if (a == "--route-trace")
@@ -1235,6 +1431,29 @@ int main(int argc, char ** argv) {
             return 1;
         }
     }
+
+    std::string file_error;
+    if (system_prompt_file_seen && !read_text_file(system_prompt_file, cfg.system_prompt, file_error)) {
+        std::fprintf(stderr, "bmoe-server: %s\n", file_error.c_str());
+        return 2;
+    }
+    if (chat_template_file_seen && !read_text_file(chat_template_file, cfg.chat_template, file_error)) {
+        std::fprintf(stderr, "bmoe-server: %s\n", file_error.c_str());
+        return 2;
+    }
+    const std::string normalized_effort = normalize_reasoning_effort(cfg.reasoning_effort);
+    cfg.reasoning_effort = normalized_effort;
+    if (normalized_effort == "none") {
+        cfg.think = false;
+        cfg.reasoning_effort.clear();
+    } else if (no_think_seen && reasoning_effort_seen) {
+        std::fprintf(stderr, "bmoe-server: --no-think conflicts with --reasoning-effort %s\n",
+                     cfg.reasoning_effort.c_str());
+        return 2;
+    }
+    srv.default_think = cfg.think;
+    srv.default_reasoning_effort = cfg.reasoning_effort;
+    srv.default_system_prompt = cfg.system_prompt;
 
     // Env overrides
     const char * env_port = std::getenv("BMOE_SERVER_PORT");

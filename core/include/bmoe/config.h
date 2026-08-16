@@ -36,6 +36,29 @@ enum class DenseWeightsMode {
                // back, so an A/B against Anonymous can never silently compare a mode to itself.
 };
 
+enum class KvCacheType {
+    F32,
+    F16,
+    BF16,
+    Q8_0,
+    Q5_0,
+    Q5_1,
+    Q4_0,
+    Q4_1,
+    IQ4_NL,
+};
+
+enum class FlashAttentionMode {
+    Auto,
+    Enabled,
+    Disabled,
+};
+
+const char * kv_cache_type_name(KvCacheType type);
+const char * flash_attention_mode_name(FlashAttentionMode mode);
+bool parse_kv_cache_type(const std::string & value, KvCacheType & out);
+bool parse_flash_attention_mode(const std::string & value, FlashAttentionMode & out);
+
 // MoE expert-selective streaming knobs.
 struct MoeStreamConfig {
     bool enabled = false; // turn streaming on; init fails fast if the model is not MoE
@@ -318,12 +341,19 @@ struct RunConfig {
     bool chatml = false;   // wrap the prompt in the model family's chat turn (arch-aware)
     bool progress = false; // emit machine telemetry (one JSON line per token)
 
+    std::string system_prompt;
+    std::string chat_template;
+    KvCacheType cache_type_k = KvCacheType::F16;
+    KvCacheType cache_type_v = KvCacheType::F16;
+    FlashAttentionMode flash_attention = FlashAttentionMode::Auto;
+
     // Render the chat template with reasoning enabled. Passed to the template as the
     // `enable_thinking` kwarg, so a reasoning model (Qwen3, thinking Gemma, …) only emits
     // its thinking channel when true. Off suppresses reasoning at the source rather than
     // relying on the display-time parser, which cannot strip a format it does not know.
     // Only meaningful with chatml; the raw-prompt path ignores it.
     bool think = true;
+    std::string reasoning_effort;
 
     // Override the number of active MoE experts per token (top-k routing). 0 = use the
     // model's own <arch>.expert_used_count from the gguf. A lower value cuts per-token
