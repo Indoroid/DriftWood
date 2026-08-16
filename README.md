@@ -404,9 +404,9 @@ handles `content` as either a plain string or an array of `{"type":"text","text"
 Chat requests preserve the complete supplied transcript, including system and earlier assistant
 messages. OpenAI function tools, assistant `tool_calls`, tool-result messages, `tool_choice`, and
 `parallel_tool_calls` are passed through the model's own Jinja template; parsed calls are returned in
-the standard response shape for agent clients. Tool-bearing SSE requests are buffered until the
-parser can distinguish a final answer from a tool call, then emitted as one valid delta followed by
-`[DONE]`. Other SSE requests stream token-by-token.
+the standard response shape for agent clients. SSE chat requests stream parser-confirmed answer and
+reasoning deltas while tool-call markup remains withheld; completed tool calls are emitted in the
+standard response shape before `[DONE]`.
 
 Request-level `temperature` and `top_p` override server defaults. Every applicable `bmoe-cli` model
 and diagnostic option is accepted by the server, including CSV/route/compute/I/O traces,

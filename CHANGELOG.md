@@ -32,6 +32,8 @@ Semantic Versioning.
   tool-result messages, tool choice, and parallel-call policy through the model-owned Jinja template.
   Parsed model calls return as standard OpenAI `tool_calls` in non-streaming and SSE responses, with
   deterministic IDs when the model format supplies none.
+- **BMOE chat SSE output.** Chat requests now stream parser-confirmed answer and reasoning deltas
+  even when pi supplies tool definitions; tool-call markup remains withheld until the call is complete.
 
 ### Fixed
 - **`--overlap` hook restored on the current llama.cpp fork.** The submodule now pins the

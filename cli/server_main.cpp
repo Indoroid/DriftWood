@@ -815,12 +815,19 @@ struct ServerState {
 
 // ── Request handlers ─────────────────────────────────────────────────────────
 
-static std::string make_stream_delta(
-    bool chat, const std::string & id, const std::string & object, long created, const std::string & piece) {
+static std::string make_stream_delta(bool chat,
+                                     const std::string & id,
+                                     const std::string & object,
+                                     long created,
+                                     const std::string & piece,
+                                     const std::string & reasoning = {}) {
     json choice = {{"index", 0}, {"finish_reason", nullptr}};
-    if (chat)
-        choice["delta"] = {{"content", piece}};
-    else {
+    if (chat) {
+        json delta = json::object();
+        if (!piece.empty()) delta["content"] = piece;
+        if (!reasoning.empty()) delta["reasoning_content"] = reasoning;
+        choice["delta"] = std::move(delta);
+    } else {
         choice["text"] = piece;
         choice["logprobs"] = nullptr;
     }
@@ -830,6 +837,30 @@ static std::string make_stream_delta(
                  {"model", "bmoe"},
                  {"choices", json::array({std::move(choice)})}})
         .dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+struct StreamTextState {
+    std::string text;
+    std::string reasoning;
+};
+
+static std::string stream_suffix(const std::string & current, std::string & sent) {
+    if (current.size() >= sent.size() && current.compare(0, sent.size(), sent) == 0) {
+        std::string suffix = current.substr(sent.size());
+        sent = current;
+        return suffix;
+    }
+    // A final parse can reframe an incomplete partial parse. Use the complete parsed value once;
+    // it is safer than dropping the answer, and the common parser normally remains monotonic.
+    sent = current;
+    return current;
+}
+
+static void add_stream_text_delta(json & delta, const TokenMetrics & metrics, StreamTextState & state) {
+    const std::string text = stream_suffix(metrics.text, state.text);
+    const std::string reasoning = stream_suffix(metrics.reasoning, state.reasoning);
+    if (!text.empty()) delta["content"] = text;
+    if (!reasoning.empty()) delta["reasoning_content"] = reasoning;
 }
 
 static std::string response_tool_call_id(const ToolCall & call, size_t index, const std::string & request_tag) {
@@ -922,7 +953,6 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
     }
 
     // Build generate request
-    const bool buffer_for_tools = chat && !api.tools.empty();
     GenerateRequest greq;
     greq.prompt = std::move(api.prompt);
     greq.messages = std::move(api.messages);
@@ -937,9 +967,10 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
     greq.parallel_tool_calls = api.parallel_tool_calls;
     greq.chatml = chat || state.srv_cfg.completion_chatml;
     greq.n_predict = api.n_predict;
-    // OpenAI streaming needs only piece deltas. The optional CLI-compatible progress protocol needs
-    // parsed cumulative text/reasoning, accepting its documented O(n²) rendering cost when enabled.
-    greq.render_text = state.srv_cfg.progress;
+    // Chat SSE needs parser-confirmed text so tool-call markup never leaks into normal content.
+    // ponytail: reparses cumulative chat text per token; an incremental parser is the upgrade path
+    // if HTTP generation throughput makes this measurable.
+    greq.render_text = state.srv_cfg.progress || (chat && api.stream);
     greq.think = api.think.value_or(!api.reasoning_effort.empty() ? true : state.srv_cfg.default_think);
     greq.reasoning_effort = api.reasoning_effort.empty() ? state.srv_cfg.default_reasoning_effort
                                                           : api.reasoning_effort;
@@ -1027,18 +1058,29 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
         send_sse(fd, data);
     }
 
+    StreamTextState streamed_text;
     auto on_token = [&](const TokenMetrics & m) {
         progress_token(m);
-        if (!buffer_for_tools)
-            send_sse(fd, make_stream_delta(chat, id_prefix + "-" + request_tag, object, created, m.piece));
+        if (!chat) {
+            send_sse(fd, make_stream_delta(false, id_prefix + "-" + request_tag, object, created, m.piece));
+            return;
+        }
+        json delta = json::object();
+        add_stream_text_delta(delta, m, streamed_text);
+        if (!delta.empty()) {
+            send_sse(fd, make_stream_delta(true, id_prefix + "-" + request_tag, object, created,
+                                           delta.value("content", ""), delta.value("reasoning_content", "")));
+        }
     };
 
     auto result = state.session->generate(greq, on_token, state.metrics);
     if (result) {
-        if (buffer_for_tools) {
+        if (chat) {
             json delta = json::object();
-            if (!result.generated_text.empty()) delta["content"] = result.generated_text;
-            if (!result.reasoning_text.empty()) delta["reasoning_content"] = result.reasoning_text;
+            const std::string text = stream_suffix(result.generated_text, streamed_text.text);
+            const std::string reasoning = stream_suffix(result.reasoning_text, streamed_text.reasoning);
+            if (!text.empty()) delta["content"] = text;
+            if (!reasoning.empty()) delta["reasoning_content"] = reasoning;
             if (!result.tool_calls.empty()) {
                 delta["tool_calls"] = json::array();
                 for (size_t i = 0; i < result.tool_calls.size(); ++i) {
@@ -1049,13 +1091,17 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
                                                    {"function", {{"name", call.name}, {"arguments", call.arguments}}}});
                 }
             }
-            const json buffered = {
-                {"id", id_prefix + "-" + request_tag},
-                {"object", object},
-                {"created", created},
-                {"model", "bmoe"},
-                {"choices", json::array({{{"index", 0}, {"delta", std::move(delta)}, {"finish_reason", nullptr}}})}};
-            send_sse(fd, buffered.dump(-1, ' ', false, json::error_handler_t::replace));
+            if (!delta.empty()) {
+                const json buffered = {
+                    {"id", id_prefix + "-" + request_tag},
+                    {"object", object},
+                    {"created", created},
+                    {"model", "bmoe"},
+                    {"choices", json::array({{{"index", 0},
+                                                {"delta", std::move(delta)},
+                                                {"finish_reason", nullptr}}})}};
+                send_sse(fd, buffered.dump(-1, ' ', false, json::error_handler_t::replace));
+            }
         }
 
         json choice = {{"index", 0}, {"finish_reason", result.tool_calls.empty() ? "stop" : "tool_calls"}};

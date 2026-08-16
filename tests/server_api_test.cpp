@@ -145,6 +145,16 @@ int main() {
     const json chat_delta = json::parse(make_stream_delta(true, "chatcmpl-1", "chat.completion.chunk", 1, "hi"));
     check(chat_delta["choices"][0]["delta"].value("content", "") == "hi", "chat SSE uses choices[].delta.content");
 
+    StreamTextState streamed;
+    check(stream_suffix("Hel", streamed.text) == "Hel", "first parsed text delta is emitted");
+    check(stream_suffix("Hello", streamed.text) == "lo", "parsed text emits only the new suffix");
+    check(stream_suffix("Hello", streamed.text).empty(), "unchanged parsed text emits nothing");
+    check(stream_suffix("think", streamed.reasoning) == "think", "reasoning delta is tracked separately");
+    const json reasoning_delta = json::parse(
+        make_stream_delta(true, "chatcmpl-2", "chat.completion.chunk", 1, "answer", "thought"));
+    check(reasoning_delta["choices"][0]["delta"].value("reasoning_content", "") == "thought",
+          "chat SSE carries reasoning separately");
+
     ToolCall missing_id;
     check(response_tool_call_id(missing_id, 2, "123_4") == "call_123_4_2",
           "missing tool-call id gets deterministic fallback");
