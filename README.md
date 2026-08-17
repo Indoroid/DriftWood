@@ -401,7 +401,10 @@ It exposes an OpenAI-compatible REST API:
 Both POST endpoints accept `stream: true` for server-sent events (SSE) token streaming, using
 `Transfer-Encoding: chunked` for compatibility with OpenAI-compatible SDKs (OpenAI/JS,
 OpenAI/Python). The server also accepts `max_completion_tokens` in addition to `max_tokens`, and
-handles `content` as either a plain string or an array of `{"type":"text","text":"..."}` objects.
+handles `content` as either a plain string or a content-part array. With `--mmproj`, chat content
+may include OpenAI-style `image_url` data URLs and `input_audio` base64 parts; text/media ordering is
+preserved when mtmd markers are rendered. Remote image URLs are intentionally not fetched by the
+server, so send images as `data:<mime>;base64,...`.
 Responses echo the requested `model` (or use the loaded GGUF filename when omitted) and include the
 standard OpenAI completion fields, including `logprobs`, `system_fingerprint`, and token `usage`.
 With `stream_options: {"include_usage": true}`, normal SSE chunks contain `"usage": null` and a
@@ -421,6 +424,36 @@ the CLI's stdout telemetry alongside HTTP/SSE responses; request bodies replace 
 requests always use the model template. Raw `/v1/completions` stay raw unless the
 server was started with `--chatml`, matching the CLI flag exactly. `--no-think` sets the server's
 default; each request may override it with `think` or `reasoning_effort`.
+
+Multimodal server example:
+
+```bash
+build/cli/bmoe-server -m model.gguf --mmproj mmproj-model-f16.gguf --moe-stream \
+  --cache-mb auto --port 8080
+```
+
+```json
+{
+  "model": "model.gguf",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image: "},
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/png;base64,<BASE64>"}
+        }
+      ]
+    }
+  ],
+  "max_tokens": 128
+}
+```
+
+Audio uses `{"type":"input_audio","input_audio":{"data":"<BASE64>","format":"wav"}}`.
+The default request-body cap is 64 MiB and can be changed with `--max-request-mb`. Multimodal v1
+still starts each request from a fresh KV state and rejects MTP/n-gram speculation for media turns.
 
 Runtime controls split by lifetime. Request-hot controls are `think`, `reasoning_effort`,
 `reasoning_budget_tokens`, complete chat messages (including system prompts), `chat_template_kwargs`,

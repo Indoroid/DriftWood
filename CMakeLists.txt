@@ -47,11 +47,16 @@ set(BMOE_HAVE_LLAMA OFF)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp/CMakeLists.txt")
     set(BMOE_HAVE_LLAMA ON)
     # Upstream examples/tests/server stay off; build the common utils we link for chat.
-    set(LLAMA_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_SERVER  OFF CACHE BOOL "" FORCE)
-    set(LLAMA_BUILD_COMMON  ON  CACHE BOOL "" FORCE)
-    set(LLAMA_CURL          OFF CACHE BOOL "" FORCE)  # common's model-download path unused
+    set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+    # Build llama.cpp's multimodal projector library without its CLI/server tools.
+    set(LLAMA_BUILD_MTMD     ON  CACHE BOOL "" FORCE)
+    # v1 handles image/audio buffers; video helper policy comes later.
+    set(MTMD_VIDEO           OFF CACHE BOOL "" FORCE)
+    set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)  # common's model-download path unused
     add_subdirectory(third_party/llama.cpp EXCLUDE_FROM_ALL)
 endif()
 

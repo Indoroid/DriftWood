@@ -217,7 +217,7 @@ int main() {
         http_write(sockets[0], wire);
         shutdown(sockets[0], SHUT_WR);
         std::string raw;
-        check(read_request(sockets[1], raw), "uppercase Content-Length is accepted");
+        check(read_request(sockets[1], raw, 1024 * 1024), "uppercase Content-Length is accepted");
         HttpRequest http;
         check(parse_http_request(raw, http) && http.body == body, "HTTP body is retained exactly");
         close(sockets[0]);

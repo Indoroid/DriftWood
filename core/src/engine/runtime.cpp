@@ -1,5 +1,6 @@
 #include "bmoe/runtime.h"
 #include "bmoe/session.h"
+#include "../multimodal/media_io.h"
 
 #include <string>
 
@@ -23,6 +24,7 @@ SessionConfig session_config_from(const RunConfig & cfg) {
     sc.sampling = cfg.sampling; // greedy by default; opt-in stochastic decoding
     sc.moe = cfg.moe;
     sc.spec = cfg.spec; // self-speculation (MTP head or n-gram lookup); off by default
+    sc.multimodal = cfg.multimodal;
     return sc;
 }
 
@@ -55,6 +57,16 @@ RunResult run(const RunConfig & cfg,
 
     GenerateRequest req;
     req.prompt = cfg.prompt;
+    for (const std::string & path : cfg.media_paths) {
+        MediaInput input;
+        std::string media_error;
+        if (!load_media_file(path, input, media_error)) {
+            RunResult r;
+            r.error = media_error;
+            return r;
+        }
+        req.media.push_back(std::move(input));
+    }
     req.n_predict = cfg.n_predict;
     req.think = cfg.think;
     req.reasoning_effort = cfg.reasoning_effort;

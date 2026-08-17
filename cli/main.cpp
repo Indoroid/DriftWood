@@ -623,6 +623,15 @@ static void print_usage(const char * argv0) {
         "usage: %s -m <model.gguf> [options]\n"
         "\n"
         "  -m, --model PATH        gguf model (required)\n"
+        "  -mm, --mmproj PATH      multimodal projector gguf\n"
+        "      --mmproj-offload    allow projector GPU offload (default)\n"
+        "      --no-mmproj-offload keep projector on CPU\n"
+        "      --image PATH        one-shot image input; repeatable\n"
+        "      --audio PATH        one-shot audio input (wav/mp3/flac); repeatable\n"
+        "      --media PATH        one-shot image/audio alias; repeatable\n"
+        "      --image-min-tokens N  dynamic-resolution image token floor (-1=metadata)\n"
+        "      --image-max-tokens N  dynamic-resolution image token ceiling (-1=metadata)\n"
+        "      --mtmd-batch-max-tokens N projector output batch limit (default 1024)\n"
         "  -p, --prompt STR        prompt text\n"
         "  -n, --n-predict N       tokens to generate (default 128)\n"
         "  -t, --threads N         compute threads (default 4)\n"
@@ -706,7 +715,7 @@ static void print_usage(const char * argv0) {
         "                          ahwb = as anon, but into dma-buf memory the kernel may not reclaim\n"
         "                          at all — not even to zram, which is what anon still pays for.\n"
         "                          Android-only; measured +17.9%% on a long generation, off by default)\n"
-        "                          Deprecated aliases kept for old scripts: --dense-odirect means\n"
+        "                          [DEPRECATED] aliases kept for old scripts: --dense-odirect means\n"
         "                          `--dense-weights anon`, --no-warm-dense means `--dense-weights mmap`\n"
         "      --load-all          debug: read ALL experts each token (A/B baseline)\n"
         "      --force-cache       allow a cache-mb in the pathological band\n"
@@ -840,6 +849,20 @@ int main(int argc, char ** argv) {
         };
         if (a == "-m" || a == "--model")
             cfg.model_path = next("-m");
+        else if (a == "-mm" || a == "--mmproj")
+            cfg.multimodal.mmproj_path = next("--mmproj");
+        else if (a == "--mmproj-offload")
+            cfg.multimodal.offload = true;
+        else if (a == "--no-mmproj-offload")
+            cfg.multimodal.offload = false;
+        else if (a == "--image" || a == "--audio" || a == "--media")
+            cfg.media_paths.emplace_back(next(a.c_str()));
+        else if (a == "--image-min-tokens")
+            cfg.multimodal.image_min_tokens = std::atoi(next("--image-min-tokens"));
+        else if (a == "--image-max-tokens")
+            cfg.multimodal.image_max_tokens = std::atoi(next("--image-max-tokens"));
+        else if (a == "--mtmd-batch-max-tokens")
+            cfg.multimodal.batch_max_tokens = std::atoi(next("--mtmd-batch-max-tokens"));
         else if (a == "-p" || a == "--prompt")
             cfg.prompt = next("-p");
         else if (a == "-n" || a == "--n-predict")
@@ -1066,6 +1089,10 @@ int main(int argc, char ** argv) {
     if (cfg.model_path.empty()) {
         print_usage(argv[0]);
         return 1;
+    }
+    if (session_mode && !cfg.media_paths.empty()) {
+        std::fprintf(stderr, "bmoe: --image/--audio/--media are one-shot only and cannot be used with --session\n");
+        return 2;
     }
 
     ValidationResult vr = validate(cfg);

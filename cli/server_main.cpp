@@ -23,6 +23,7 @@
 #include "bmoe/runtime.h"
 #include "bmoe/session.h"
 #include "bmoe/version.h"
+#include "base64.hpp"
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
@@ -336,6 +337,7 @@ struct ApiCompletionRequest {
     std::string model;
     std::string prompt;
     std::vector<ChatMessage> messages;
+    std::vector<MediaInput> media;
     std::vector<ChatTool> tools;
     ChatToolChoice tool_choice = ChatToolChoice::Auto;
     bool parallel_tool_calls = false;
@@ -349,23 +351,151 @@ struct ApiCompletionRequest {
     std::map<std::string, std::string> chat_template_kwargs;
 };
 
-static bool parse_message_content(const json & value, std::string & out) {
-    if (value.is_null()) {
-        out.clear();
-        return true;
-    }
-    if (value.is_string()) {
-        out = value.get<std::string>();
-        return true;
-    }
-    if (!value.is_array()) return false;
+static constexpr size_t k_max_media_item_bytes = 32ull * 1024ull * 1024ull;
+static constexpr size_t k_max_media_total_bytes = 64ull * 1024ull * 1024ull;
 
-    out.clear();
+static bool decode_base64_media(const std::string & encoded,
+                                const std::string & name,
+                                std::vector<MediaInput> & media,
+                                std::string & error) {
+    std::string decoded;
+    try {
+        decoded = base64::decode(encoded);
+    } catch (const std::exception & e) {
+        error = "invalid base64 media payload: " + std::string(e.what());
+        return false;
+    }
+    if (decoded.empty()) {
+        error = "media payload is empty";
+        return false;
+    }
+    if (decoded.size() > k_max_media_item_bytes) {
+        error = "decoded media item exceeds 32 MiB";
+        return false;
+    }
+    size_t total = decoded.size();
+    for (const MediaInput & existing : media) total += existing.bytes.size();
+    if (total > k_max_media_total_bytes) {
+        error = "decoded media payloads exceed 64 MiB total";
+        return false;
+    }
+
+    MediaInput input;
+    input.name = name;
+    input.bytes.assign(reinterpret_cast<const std::uint8_t *>(decoded.data()),
+                       reinterpret_cast<const std::uint8_t *>(decoded.data() + decoded.size()));
+    media.push_back(std::move(input));
+    return true;
+}
+
+static bool decode_data_url(const std::string & url,
+                            std::vector<MediaInput> & media,
+                            std::string & error) {
+    if (url.rfind("data:", 0) != 0) {
+        error = "remote image URLs are not supported; send image_url.url as a data:...;base64 URL";
+        return false;
+    }
+    const size_t comma = url.find(',');
+    if (comma == std::string::npos || comma <= 5) {
+        error = "invalid media data URL";
+        return false;
+    }
+    const std::string meta = url.substr(5, comma - 5);
+    if (meta.find(";base64") == std::string::npos) {
+        error = "media data URL must use base64 encoding";
+        return false;
+    }
+    return decode_base64_media(url.substr(comma + 1), meta, media, error);
+}
+
+static bool parse_message_content(const json & value,
+                                  ChatMessage & message,
+                                  std::vector<MediaInput> & media,
+                                  std::string & error) {
+    message.content.clear();
+    message.content_parts.clear();
+    if (value.is_null()) return true;
+    if (value.is_string()) {
+        message.content = value.get<std::string>();
+        return true;
+    }
+    if (!value.is_array()) {
+        error = "Message content must be a string or content-part array";
+        return false;
+    }
+
     for (const json & part : value) {
-        if (!part.is_object()) return false;
+        if (!part.is_object()) {
+            error = "Each message content part must be an object";
+            return false;
+        }
+        if (part.contains("type") && !part["type"].is_string()) {
+            error = "message content part type must be a string";
+            return false;
+        }
         const std::string type = part.value("type", "text");
-        if (type != "text" || !part.contains("text") || !part["text"].is_string()) continue;
-        out += part["text"].get<std::string>();
+        if (type == "text") {
+            if (!part.contains("text") || !part["text"].is_string()) {
+                error = "text content part needs a string text field";
+                return false;
+            }
+            ChatContentPart content;
+            content.kind = ChatContentKind::Text;
+            content.text = part["text"].get<std::string>();
+            message.content += content.text; // raw fallback for models without a usable template
+            message.content_parts.push_back(std::move(content));
+            continue;
+        }
+
+        if (type == "image_url" || type == "input_image") {
+            std::string url;
+            if (part.contains("image_url")) {
+                const json & image_url = part["image_url"];
+                if (image_url.is_string()) url = image_url.get<std::string>();
+                else if (image_url.is_object() && image_url.contains("url") && image_url["url"].is_string())
+                    url = image_url["url"].get<std::string>();
+            }
+            if (url.empty() && part.contains("url") && part["url"].is_string())
+                url = part["url"].get<std::string>();
+            if (url.empty()) {
+                error = type + " content part needs image_url.url (or url)";
+                return false;
+            }
+            const size_t media_index = media.size();
+            if (!decode_data_url(url, media, error)) return false;
+            ChatContentPart content;
+            content.kind = ChatContentKind::Media;
+            content.media_index = media_index;
+            message.content_parts.push_back(std::move(content));
+            continue;
+        }
+
+        if (type == "input_audio" || type == "audio") {
+            const json * audio = nullptr;
+            if (part.contains("input_audio") && part["input_audio"].is_object()) audio = &part["input_audio"];
+            else if (part.contains("audio") && part["audio"].is_object()) audio = &part["audio"];
+            else if (part.contains("data")) audio = &part;
+            if (!audio || !audio->contains("data") || !(*audio)["data"].is_string()) {
+                error = type + " content part needs base64 audio data";
+                return false;
+            }
+            if (audio->contains("format") && !(*audio)["format"].is_string()) {
+                error = type + " content part format must be a string";
+                return false;
+            }
+            const std::string format = audio->value("format", "audio");
+            const size_t media_index = media.size();
+            if (!decode_base64_media((*audio)["data"].get<std::string>(), "audio/" + format, media, error))
+                return false;
+            ChatContentPart content;
+            content.kind = ChatContentKind::Media;
+            content.media_index = media_index;
+            message.content_parts.push_back(std::move(content));
+            continue;
+        }
+
+        // Preserve the server's old tolerance for non-text extension parts. Known media types are
+        // handled above; unknown future OpenAI parts are ignored instead of breaking text clients.
     }
     return true;
 }
@@ -496,10 +626,8 @@ static bool parse_completion_request(const std::string & body,
             }
             ChatMessage msg;
             msg.role = item["role"].get<std::string>();
-            if (item.contains("content") && !parse_message_content(item["content"], msg.content)) {
-                error = "Message content must be a string or text-content array";
+            if (item.contains("content") && !parse_message_content(item["content"], msg, out.media, error))
                 return false;
-            }
             msg.reasoning_content = item.value("reasoning_content", "");
             msg.tool_name = item.value("name", "");
             msg.tool_call_id = item.value("tool_call_id", "");
@@ -536,13 +664,20 @@ static bool parse_completion_request(const std::string & body,
             }
             out.messages.push_back(std::move(msg));
         }
+        bool have_user_input = false;
         for (auto it = out.messages.rbegin(); it != out.messages.rend(); ++it) {
-            if (it->role == "user") {
-                out.prompt = it->content; // raw fallback if this model has no chat template
-                break;
+            if (it->role != "user") continue;
+            out.prompt = it->content; // raw text fallback if this model has no chat template
+            have_user_input = !it->content.empty();
+            if (!have_user_input) {
+                have_user_input = std::any_of(it->content_parts.begin(), it->content_parts.end(),
+                                              [](const ChatContentPart & part) {
+                                                  return part.kind == ChatContentKind::Media;
+                                              });
             }
+            break;
         }
-        if (out.prompt.empty()) {
+        if (!have_user_input) {
             error = "messages must contain a non-empty user message";
             return false;
         }
@@ -820,6 +955,9 @@ struct ServerConfig {
     std::string host = "127.0.0.1";
     int port = 8080;
     int max_connections = 32;
+    // Base64 media expands request bodies substantially; keep an explicit cap instead of the old
+    // 1 MiB text-only hard limit. The server remains local-only by default.
+    int max_request_mb = 64;
     bool default_think = true;
     std::string default_reasoning_effort;
     std::string default_system_prompt;
@@ -1009,11 +1147,16 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
         send_json_error(fd, 400, parse_error.c_str(), false);
         return;
     }
+    if (!api.media.empty() && !state.session_cfg.multimodal.enabled()) {
+        send_json_error(fd, 400, "Multimodal content requires bmoe-server --mmproj PATH", false);
+        return;
+    }
 
     // Build generate request
     GenerateRequest greq;
     greq.prompt = std::move(api.prompt);
     greq.messages = std::move(api.messages);
+    greq.media = std::move(api.media);
     if (chat && !state.srv_cfg.default_system_prompt.empty()) {
         const bool has_system = std::any_of(greq.messages.begin(), greq.messages.end(), [](const ChatMessage & message) {
             return message.role == "system";
@@ -1184,7 +1327,7 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
 
 // Read the full HTTP request from a blocking socket: headers + body.
 // Returns false if the connection closed or the request was too large.
-static bool read_request(int fd, std::string & raw) {
+static bool read_request(int fd, std::string & raw, size_t max_body_bytes) {
     char buf[65536];
     while (true) {
         ssize_t n = read(fd, buf, sizeof(buf));
@@ -1224,7 +1367,8 @@ static bool read_request(int fd, std::string & raw) {
                     const unsigned long long parsed = std::strtoull(begin, &end, 10);
                     while (end && *end == ' ')
                         ++end;
-                    if (errno != 0 || end == begin || (end && *end != '\0') || parsed > 1024ull * 1024ull) return false;
+                    if (errno != 0 || end == begin || (end && *end != '\0') || parsed > max_body_bytes)
+                        return false;
                     content_length = (size_t) parsed;
                     have_length = true;
                     break;
@@ -1234,7 +1378,7 @@ static bool read_request(int fd, std::string & raw) {
         }
         if (!have_length) return true;
         if (raw.size() - body_start >= content_length) return true;
-        if (raw.size() > 1024 * 1024) return false;
+        if (raw.size() > body_start + max_body_bytes) return false;
     }
 }
 
@@ -1242,7 +1386,8 @@ static bool read_request(int fd, std::string & raw) {
 // is short-lived. This also avoids dropping a pipelined request after the first parsed body.
 static void process_connection(int fd, ServerState & state) {
     std::string raw;
-    if (!read_request(fd, raw)) return; // connection closed
+    if (!read_request(fd, raw, static_cast<size_t>(state.srv_cfg.max_request_mb) * 1024ull * 1024ull))
+        return; // connection closed or request exceeded configured body cap
 
     HttpRequest req;
     if (!parse_http_request(raw, req)) {
@@ -1260,27 +1405,82 @@ static void print_usage(const char * argv0) {
     std::printf("usage: %s -m <model.gguf> [options]\n"
                 "\n"
                 "  -m, --model PATH        gguf model (required)\n"
+                "  -mm, --mmproj PATH      multimodal projector gguf\n"
+                "      --mmproj-offload     offload projector to GPU when supported (default)\n"
+                "      --no-mmproj-offload  keep projector on CPU\n"
+                "      --image-min-tokens N override projector image token floor\n"
+                "      --image-max-tokens N override projector image token ceiling\n"
+                "      --mtmd-batch-max-tokens N projector output batch limit (default 1024)\n"
                 "      --port N            HTTP server port (default 8080)\n"
                 "      --host ADDR         bind address (default 127.0.0.1; use 0.0.0.0 for\n"
                 "                          remote access)\n"
+                "      --max-request-mb N  maximum HTTP request body (default 64 MiB)\n"
                 "\n"
-                "  bmoe-cli parity (model/session-wide):\n"
-                "  -n, --n-predict, -t, --threads, -c, --ctx-size\n"
-                "  --batch-size N (default 2048), --ubatch-size N (default 512; --ubatch alias)\n"
-                "  --chatml, --system-prompt TEXT, --system-prompt-file PATH\n"
-                "  --no-think, --reasoning-effort VALUE\n"
-                "  --chat-template TEXT, --chat-template-file PATH\n"
-                "  --cache-type-k TYPE, --cache-type-v TYPE, --flash-attn auto|on|off\n"
-                "  --temp, --top-k, --top-p, --seed\n"
-                "  --progress, --session\n"
-                "  --mtp, --ngram, --draft, --mtp-p-min, --ngram-min-match\n"
-                "  --csv, --route-trace, --compute-trace, --compute-trace-layers, --io-trace\n"
-                "  --moe-stream, --cache-mb, --cache-floor-mb, --cache-ceil-mb\n"
-                "  --io-threads, --no-odirect, --dense-weights, --load-all, --force-cache\n"
-                "  --overlap, --io-two-wave, --prefetch, --prefetch-sync\n"
-                "  --drop-cold-experts, --drop-no-renorm, --drop-in-prefill\n"
-                "  --route-ahead, --predict-log, --predict-prefetch, --predict-spec-max\n"
-                "  --n-expert-used, --list-archs\n"
+                "  Model and generation (same behavior as bmoe-cli):\n"
+                "  -n, --n-predict N       maximum generated tokens per request (default 128)\n"
+                "  -t, --threads N         CPU compute threads (default 4)\n"
+                "  -c, --ctx-size N        model context size (default 2048)\n"
+                "      --batch-size N      logical prompt-prefill batch size (default 2048)\n"
+                "      --ubatch-size N     maximum physical graph width (default 512; --ubatch alias)\n"
+                "      --n-expert-used N   override routed experts per token; 0 uses the model default\n"
+                "\n"
+                "  Chat and KV cache:\n"
+                "      --chatml            apply the model chat template to /v1/completions too\n"
+                "      --system-prompt TEXT default system message for chat requests\n"
+                "      --system-prompt-file PATH read the default system message from a file\n"
+                "      --no-think          disable reasoning through model template controls\n"
+                "      --reasoning-effort VALUE  default low|medium|high|none reasoning effort\n"
+                "      --chat-template TEXT override the model-provided chat template\n"
+                "      --chat-template-file PATH read the chat-template override from a file\n"
+                "      --cache-type-k TYPE  KV key type: f32,f16,bf16,q8_0,q5_0,q5_1,q4_0,q4_1,iq4_nl\n"
+                "      --cache-type-v TYPE  KV value type; quantized values require Flash Attention\n"
+                "      --flash-attn MODE    Flash Attention policy: auto|on|off (default auto)\n"
+                "\n"
+                "  Sampling:\n"
+                "      --temp F            temperature; <=0 is deterministic greedy decoding\n"
+                "      --top-k N           top-k sampling cutoff; 0 disables this stage\n"
+                "      --top-p F           nucleus sampling cutoff in (0,1]\n"
+                "      --seed N            sampling RNG seed; omitted means random per process\n"
+                "\n"
+                "  Speculative decoding (choose one source):\n"
+                "      --mtp               draft with the model built-in MTP head\n"
+                "      --ngram             draft from repeated token sequences without another model\n"
+                "      --draft N           maximum drafted tokens per verification batch\n"
+                "      --mtp-p-min F       stop MTP drafting below this candidate probability\n"
+                "      --ngram-min-match N minimum repeated-token match allowed to draft\n"
+                "\n"
+                "  Telemetry and diagnostics:\n"
+                "      --progress          emit BMOE progress JSON alongside HTTP responses\n"
+                "      --session           compatibility no-op; the HTTP server is always persistent\n"
+                "      --csv PATH          write per-token metrics as CSV\n"
+                "      --route-trace PATH  record routed experts; requires --moe-stream\n"
+                "      --compute-trace PATH time every graph node; serializes the graph\n"
+                "      --compute-trace-layers PATH aggregate compute timing by layer\n"
+                "      --io-trace PATH     record each expert read; requires --moe-stream\n"
+                "\n"
+                "  MoE expert streaming:\n"
+                "      --moe-stream        keep routed experts on flash and load them on demand\n"
+                "      --cache-mb N|auto   LRU expert-cache budget in MiB; 0 disables it\n"
+                "      --cache-floor-mb N with auto sizing, reserve this much free RAM\n"
+                "      --cache-ceil-mb N  cap auto cache sizing; 0 means no cap\n"
+                "      --io-threads N     parallel expert-read lanes (default 4)\n"
+                "      --no-odirect       use the OS page cache instead of direct expert reads\n"
+                "      --dense-weights M  mmap|warm|anon|ahwb placement for non-expert weights\n"
+                "      [DEPRECATED] --dense-odirect maps to anon; --no-warm-dense maps to mmap\n"
+                "      --load-all         debug baseline: load every expert each token\n"
+                "      --force-cache      permit otherwise rejected pathological cache budgets\n"
+                "      --overlap          overlap expert I/O with FFN compute; needs the hook fork\n"
+                "      --io-two-wave      publish first-projection reads early; needs cache and overlap\n"
+                "      --prefetch K       prefetch the next K layers using prior-token routing\n"
+                "      --prefetch-sync    debug mode that waits for each speculative read\n"
+                "      --drop-cold-experts F  lossy cache-miss drop threshold in (0,1]\n"
+                "      --drop-no-renorm   do not renormalize routing weights after a drop\n"
+                "      --drop-in-prefill  permit cold-expert dropping during prompt prefill\n"
+                "      --route-ahead N    lossy routing substitution N layers early (0..8)\n"
+                "      --predict-log      measure next-layer routing prediction accuracy\n"
+                "      --predict-prefetch prefetch predicted misses and retain predicted hits\n"
+                "      --predict-spec-max N maximum predicted misses read per layer\n"
+                "      --list-archs       print supported MoE architecture recipes and exit\n"
                 "\n"
                 "  -h, --help              show this text and exit\n"
                 "      --version           print the engine version and exit\n"
@@ -1290,11 +1490,15 @@ static void print_usage(const char * argv0) {
                 "  POST /v1/completions      text completion (OpenAI-compatible)\n"
                 "  POST /v1/chat/completions chat completion (OpenAI-compatible)\n"
                 "\n"
+                "  Chat content supports text, image_url data:...;base64, and input_audio base64\n"
+                "  parts when --mmproj is loaded. Remote image URLs are not fetched by this server.\n"
                 "  Both POST endpoints accept stream=true for SSE token streaming.\n"
                 "\n"
                 "Environment:\n"
                 "  BMOE_SERVER_PORT  override --port\n"
                 "  BMOE_SERVER_HOST  override --host\n"
+                "  BMOE_MMPROJ       default --mmproj path\n"
+                "  BMOE_MAX_REQUEST_MB override --max-request-mb\n"
                 "  BMOE_CACHE_MB, BMOE_IO_THREADS, BMOE_OVERLAP, BMOE_PREFETCH,\n"
                 "  BMOE_N_EXPERT_USED, BMOE_PREDICT_LOG and BMOE_PREDICT_PREFETCH also apply\n",
                 argv0);
@@ -1335,10 +1539,24 @@ int main(int argc, char ** argv) {
 
         if (a == "-m" || a == "--model")
             cfg.model_path = next("-m");
+        else if (a == "-mm" || a == "--mmproj")
+            cfg.multimodal.mmproj_path = next("--mmproj");
+        else if (a == "--mmproj-offload")
+            cfg.multimodal.offload = true;
+        else if (a == "--no-mmproj-offload")
+            cfg.multimodal.offload = false;
+        else if (a == "--image-min-tokens")
+            cfg.multimodal.image_min_tokens = std::atoi(next("--image-min-tokens"));
+        else if (a == "--image-max-tokens")
+            cfg.multimodal.image_max_tokens = std::atoi(next("--image-max-tokens"));
+        else if (a == "--mtmd-batch-max-tokens")
+            cfg.multimodal.batch_max_tokens = std::atoi(next("--mtmd-batch-max-tokens"));
         else if (a == "--port")
             srv.port = std::atoi(next("--port"));
         else if (a == "--host")
             srv.host = next("--host");
+        else if (a == "--max-request-mb")
+            srv.max_request_mb = std::atoi(next("--max-request-mb"));
         else if (a == "-p" || a == "--prompt") {
             next("-p"); // ignored in server mode
         } else if (a == "-n" || a == "--n-predict")
@@ -1555,6 +1773,9 @@ int main(int argc, char ** argv) {
     if (env_port && *env_port) srv.port = std::atoi(env_port);
     const char * env_host = std::getenv("BMOE_SERVER_HOST");
     if (env_host && *env_host) srv.host = env_host;
+    const char * env_mmproj = std::getenv("BMOE_MMPROJ");
+    if (!seen.count("-mm") && !seen.count("--mmproj") && env_mmproj && *env_mmproj)
+        cfg.multimodal.mmproj_path = env_mmproj;
 
     auto env_int = [](const char * key, int dflt) {
         const char * v = std::getenv(key);
@@ -1571,6 +1792,7 @@ int main(int argc, char ** argv) {
     if (!seen.count("--n-expert-used")) cfg.n_expert_used = env_int("BMOE_N_EXPERT_USED", 0);
     if (!seen.count("--predict-log")) cfg.moe.predict_log = env_int("BMOE_PREDICT_LOG", 0) != 0;
     if (!seen.count("--predict-prefetch")) cfg.moe.predict_prefetch = env_int("BMOE_PREDICT_PREFETCH", 0) != 0;
+    if (!seen.count("--max-request-mb")) srv.max_request_mb = env_int("BMOE_MAX_REQUEST_MB", 64);
 
     if (cfg.model_path.empty()) {
         print_usage(argv[0]);
@@ -1578,6 +1800,10 @@ int main(int argc, char ** argv) {
     }
     if (srv.port < 1 || srv.port > 65535) {
         std::fprintf(stderr, "bmoe-server: --port must be in 1..65535\n");
+        return 1;
+    }
+    if (srv.max_request_mb < 1 || srv.max_request_mb > 1024) {
+        std::fprintf(stderr, "bmoe-server: --max-request-mb must be in 1..1024\n");
         return 1;
     }
 
@@ -1592,7 +1818,9 @@ int main(int argc, char ** argv) {
     }
 
     // ── Open the session ──────────────────────────────────────────────
-    std::fprintf(stderr, "bmoe-server: loading model %s ...\n", cfg.model_path.c_str());
+    std::fprintf(stderr, "bmoe-server: loading model %s%s%s ...\n", cfg.model_path.c_str(),
+                 cfg.multimodal.enabled() ? " with mmproj " : "",
+                 cfg.multimodal.enabled() ? cfg.multimodal.mmproj_path.c_str() : "");
 
     std::unique_ptr<IMetricsSink> metrics;
     if (!csv_path.empty()) {

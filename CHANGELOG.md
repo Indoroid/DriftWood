@@ -6,7 +6,26 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **Test registration restored.** CTest once again builds and runs the config, chat, thinking,
+  n-gram, server API, CLI/server parity, and (when NumPy is available) MoE byte-identity gates.
+  Fixture generation uses llama.cpp's vendored `gguf-py`, missing Python dependencies skip only
+  the model-backed gates, the route-ahead passthrough check uses the measured commit count for deep
+  models, and the stale target for nonexistent `session_cli_test.cpp` was removed.
+- **Relocated host builds.** `scripts/build-host.sh` now refreshes a stale CMake build
+  directory whose cache points at a different checkout path.
+
 ### Added
+- **Multimodal CLI and OpenAI server input.** The engine can load a llama.cpp mtmd projector with
+  `--mmproj`, prefill ordered image/audio embeddings, and continue generation through the existing
+  MoE streaming path. `bmoe-cli` accepts repeatable one-shot `--image`, `--audio`, and `--media`
+  files; `bmoe-server` accepts OpenAI `image_url` data URLs and `input_audio` base64 content parts.
+  Remote URLs are not fetched, request/media sizes are bounded, and unsupported combinations fail
+  explicitly. See `docs/multimodal.md`.
+- **Detailed bmoe-server command reference.** Server help now describes every applicable CLI option
+  individually, while the parity gate excludes only file-backed media flags whose server equivalent
+  is request content. Deprecated dense-weight aliases remain compatible and are labeled
+  `[DEPRECATED]` in both help outputs.
 - **pi-driftwood extension.** Added a standalone pi-coding-agent provider for the local
   `bmoe-server`, covering model discovery, OpenAI-compatible streaming chat, reasoning,
   tools, tool results, multi-turn history, and `/bmoe-version` without backend selection

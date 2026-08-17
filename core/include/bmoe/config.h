@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace bmoe {
 
@@ -313,10 +314,26 @@ struct SpecConfig {
     bool is_ngram() const { return source == DraftSource::ngram; }
 };
 
+// Multimodal projector policy. The text model remains under DriftWood's normal placement and
+// MoE streaming rules; this controls only llama.cpp's mtmd projector.
+struct MultimodalConfig {
+    std::string mmproj_path;
+    bool offload = true;
+    bool warmup = true;
+    int image_min_tokens = -1;
+    int image_max_tokens = -1;
+    int batch_max_tokens = 1024;
+
+    bool enabled() const { return !mmproj_path.empty(); }
+};
+
 // A full run: model, prompt, decoding, streaming, telemetry.
 struct RunConfig {
     std::string model_path;
     std::string prompt = "The capital of Japan is";
+    MultimodalConfig multimodal;
+    // One-shot CLI/runtime convenience. Session itself receives media as bytes.
+    std::vector<std::string> media_paths;
     int n_predict = 128;
     int n_threads = 4;
     int n_ctx = 2048;

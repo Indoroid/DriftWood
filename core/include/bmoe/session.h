@@ -59,6 +59,7 @@ struct SessionConfig {
     // open() builds the wider verify batch, and — for the MTP source only — the draft context.
     // See RunConfig::spec.
     SpecConfig spec;
+    MultimodalConfig multimodal;
 };
 
 // The RunConfig → SessionConfig mapping, in one place. Both entry points that open a session from a
@@ -87,9 +88,27 @@ const char * think_control_name(ThinkControl c);
 
 // Per-prompt request. clear_kv=true (the default) makes each prompt independent while the
 // expert cache stays warm; clear_kv=false continues the KV cache for multi-turn chat.
+enum class ChatContentKind {
+    Text,
+    Media,
+};
+
+struct ChatContentPart {
+    ChatContentKind kind = ChatContentKind::Text;
+    std::string text;
+    // Media parts reference GenerateRequest::media by index. Media references must appear in
+    // monotonically increasing order across the transcript so mtmd's marker order matches its
+    // bitmap/audio array exactly.
+    size_t media_index = 0;
+};
+
 struct ChatMessage {
     std::string role;
     std::string content;
+    // Optional structured content. When non-empty, Session renders these parts instead of `content`,
+    // replacing Media entries with the loaded projector's marker. This preserves OpenAI-style
+    // interleaving such as text -> image -> text without leaking mtmd types through the public API.
+    std::vector<ChatContentPart> content_parts;
     std::string reasoning_content;
     std::string tool_name;
     std::string tool_call_id;
@@ -108,12 +127,20 @@ enum class ChatToolChoice {
     None,
 };
 
+struct MediaInput {
+    std::vector<std::uint8_t> bytes;
+    std::string name;
+};
+
 struct GenerateRequest {
     std::string prompt;
     // Optional complete chat transcript. When non-empty, the model chat template receives these
     // messages verbatim instead of wrapping prompt as one user turn. This keeps HTTP requests
     // stateless while preserving system and assistant messages supplied by OpenAI-style clients.
     std::vector<ChatMessage> messages;
+    // Raw image/audio file bytes. Prompt must contain one projector marker per item; when callers
+    // supply ordinary prompt/messages DriftWood inserts those markers into the user content.
+    std::vector<MediaInput> media;
     std::vector<ChatTool> tools;
     ChatToolChoice tool_choice = ChatToolChoice::Auto;
     bool parallel_tool_calls = false;

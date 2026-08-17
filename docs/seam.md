@@ -1,8 +1,21 @@
 # The seam: how we hook llama.cpp without forking it
 
-Everything that connects BigMoeOnEdge to llama.cpp goes through two public mechanisms.
-This file documents the exact contract so it can be re-verified when the submodule is
-updated.
+Expert streaming connects BigMoeOnEdge to llama.cpp through two public mechanisms.
+Multimodal input uses the separate mtmd boundary documented below. This file records both
+contracts so they can be re-verified when the submodule is updated.
+
+## Multimodal projector boundary
+
+Multimodal input uses llama.cpp's separately built `mtmd` library. The dependency is private to
+`core/src/multimodal/mtmd_runtime.cpp`: public bmoe headers expose projector configuration,
+media byte buffers, and ordered content parts without including mtmd headers. The adapter creates
+the projector context, derives the model-owned media marker, preprocesses image/audio bytes, and
+evaluates the resulting chunks against the existing text-model context.
+
+This boundary does not alter expert tensor layout or routing. After multimodal prefill, generation
+uses the same public llama model/context APIs and the same expert-stream callback described below.
+Because mtmd is built from the pinned submodule, a llama.cpp bump must recompile this adapter and
+re-run the host build. No llama.cpp source file is patched for multimodal support.
 
 ## 1. The eval-callback
 

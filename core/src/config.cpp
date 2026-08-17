@@ -101,6 +101,19 @@ ValidationResult validate(const RunConfig & cfg) {
     if (cfg.n_expert_used < 0) {
         return fail("n_expert_used must be >= 0 (0 = model default)");
     }
+    if (!cfg.media_paths.empty() && !cfg.multimodal.enabled()) {
+        return fail("media input requires --mmproj");
+    }
+    if (cfg.multimodal.batch_max_tokens <= 0) {
+        return fail("multimodal.batch_max_tokens must be positive");
+    }
+    if (cfg.multimodal.image_min_tokens < -1 || cfg.multimodal.image_max_tokens < -1) {
+        return fail("multimodal image token limits must be -1 (metadata default) or >= 0");
+    }
+    if (cfg.multimodal.image_min_tokens >= 0 && cfg.multimodal.image_max_tokens >= 0 &&
+        cfg.multimodal.image_min_tokens > cfg.multimodal.image_max_tokens) {
+        return fail("multimodal.image_min_tokens must not exceed image_max_tokens");
+    }
     if (!cfg.think && !cfg.reasoning_effort.empty() && lower(cfg.reasoning_effort) != "none") {
         return fail("reasoning_effort requires thinking to be enabled (use 'none' to disable reasoning)");
     }
