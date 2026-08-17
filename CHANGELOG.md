@@ -34,8 +34,13 @@ Semantic Versioning.
   deterministic IDs when the model format supplies none.
 - **BMOE chat SSE output.** Chat requests now stream parser-confirmed answer and reasoning deltas
   even when pi supplies tool definitions; tool-call markup remains withheld until the call is complete.
+- **OpenAI wire-format parity.** Completion responses and SSE chunks now echo the requested model and
+  include the standard choice, fingerprint, error, and usage fields. Streaming usage follows
+  `stream_options.include_usage` with a separate final `choices: []` chunk before `[DONE]`.
 
 ### Fixed
+- **Pinned llama.cpp sync.** `scripts/sync-llama.sh` now advances the submodule only along the
+  `Indoroid/llama.cpp` `bmoe/expert-ready-hook` branch configured in `.gitmodules`.
 - **`--overlap` hook restored on the current llama.cpp fork.** The submodule now pins the
   one-commit `bmoe/expert-ready-hook` branch on top of the merged BailingMoe3 llama.cpp changes,
   so CPU expert matmuls can wait for streamed slices instead of rejecting overlap at startup.
@@ -72,6 +77,20 @@ Semantic Versioning.
 - **Portable server runtime linkage.** The build-tree server finds llama/ggml shared libraries via
   `$ORIGIN/../bin`; moving or extracting a build no longer leaves an absolute CMake RUNPATH pointing
   at the machine that compiled it.
+
+## [0.20.0] - 2026-08-17
+
+### Added
+- **Ling 3.0 (`bailingmoe3`) recipe.** Ling-3.0-flash (127B total, ~5B active) routes over 512
+  experts with a per-expert bias (the `lfm2moe` pattern) plus one always-on shared expert that
+  stays resident; the experts name the standard split suffixes, so streaming is one registry row.
+  The leading dense blocks never bind, and the trailing NextN/MTP block names expert tensors but
+  is not loaded by default, so it never streams. The hybrid KDA/MLA attention stack is dense-side
+  llama.cpp code, invisible to the streaming seam.
+
+### Changed
+- **llama.cpp integration updated** for BailingMoE3 support while retaining the single expert-ready
+  hook commit on `bmoe/expert-ready-hook`. App version 0.20.0 (versionCode 35).
 
 ## [0.19.0] - 2026-08-01
 

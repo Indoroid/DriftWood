@@ -34,7 +34,9 @@ int main() {
         "max_completion_tokens": 17,
         "temperature": 0.7,
         "top_p": 0.8,
-        "stream": true
+        "stream": true,
+        "model": "local-model",
+        "stream_options": {"include_usage": true}
     })";
     check(parse_completion_request(chat_body, true, defaults, 128, req, error), "chat request parses");
     check(req.messages.size() == 4, "full transcript is retained");
@@ -43,6 +45,8 @@ int main() {
     check(req.prompt == "Final question", "text content blocks concatenate");
     check(req.n_predict == 17, "max_completion_tokens is honored");
     check(req.stream, "stream flag is honored");
+    check(req.model == "local-model", "requested model name is retained");
+    check(req.stream_include_usage, "stream usage option is honored");
     check(std::fabs(req.sampling.temp - 0.7f) < 0.0001f, "temperature is honored");
     check(std::fabs(req.sampling.top_p - 0.8f) < 0.0001f, "top_p is honored");
 
@@ -137,13 +141,22 @@ int main() {
     check(tool_req.tool_choice == ChatToolChoice::Required, "required tool choice is retained");
     check(tool_req.parallel_tool_calls, "parallel tool setting is retained");
 
-    const json completion_delta = json::parse(make_stream_delta(false, "cmpl-1", "text_completion", 1, "hi"));
+    const json completion_delta =
+        json::parse(make_stream_delta(false, "cmpl-1", "text_completion", 1, "local-model", "hi", {}, true));
     const json & completion_choice = completion_delta["choices"][0];
     check(completion_choice.value("text", "") == "hi", "completion SSE uses choices[].text");
     check(!completion_choice.contains("delta"), "completion SSE does not use chat delta shape");
+    check(completion_delta.value("model", "") == "local-model", "SSE echoes the requested model");
+    check(completion_delta.contains("system_fingerprint") && completion_delta["system_fingerprint"].is_null(),
+          "SSE includes a null system fingerprint");
+    check(completion_delta.contains("usage") && completion_delta["usage"].is_null(),
+          "ordinary SSE chunks carry null usage when requested");
 
-    const json chat_delta = json::parse(make_stream_delta(true, "chatcmpl-1", "chat.completion.chunk", 1, "hi"));
+    const json chat_delta =
+        json::parse(make_stream_delta(true, "chatcmpl-1", "chat.completion.chunk", 1, "local-model", "hi"));
     check(chat_delta["choices"][0]["delta"].value("content", "") == "hi", "chat SSE uses choices[].delta.content");
+    check(chat_delta["choices"][0].contains("logprobs") && chat_delta["choices"][0]["logprobs"].is_null(),
+          "chat SSE includes null logprobs");
 
     StreamTextState streamed;
     check(stream_suffix("Hel", streamed.text) == "Hel", "first parsed text delta is emitted");
@@ -151,7 +164,7 @@ int main() {
     check(stream_suffix("Hello", streamed.text).empty(), "unchanged parsed text emits nothing");
     check(stream_suffix("think", streamed.reasoning) == "think", "reasoning delta is tracked separately");
     const json reasoning_delta = json::parse(
-        make_stream_delta(true, "chatcmpl-2", "chat.completion.chunk", 1, "answer", "thought"));
+        make_stream_delta(true, "chatcmpl-2", "chat.completion.chunk", 1, "local-model", "answer", "thought"));
     check(reasoning_delta["choices"][0]["delta"].value("reasoning_content", "") == "thought",
           "chat SSE carries reasoning separately");
 
@@ -162,7 +175,8 @@ int main() {
     check(response_tool_call_id(missing_id, 2, "123_4") == "model-call-id", "model tool-call id is preserved");
 
     const std::string invalid_utf8(1, static_cast<char>(0xFF));
-    const json replacement_delta = json::parse(make_stream_delta(false, "cmpl-2", "text_completion", 1, invalid_utf8));
+    const json replacement_delta =
+        json::parse(make_stream_delta(false, "cmpl-2", "text_completion", 1, "local-model", invalid_utf8));
     check(replacement_delta["choices"][0]["text"].is_string(), "invalid UTF-8 token bytes cannot crash SSE JSON");
 
     ApiCompletionRequest invalid;
@@ -172,6 +186,27 @@ int main() {
     error.clear();
     check(!parse_completion_request(R"({"prompt":"x","temperature":3})", false, defaults, 128, invalid, error),
           "out-of-range temperature is rejected");
+    error.clear();
+    check(!parse_completion_request(R"({"prompt":"x","model":""})", false, defaults, 128, invalid, error),
+          "empty model is rejected");
+    error.clear();
+    check(!parse_completion_request(R"({"prompt":"x","stream_options":{"include_usage":"yes"}})", false, defaults, 128,
+                                    invalid, error),
+          "non-boolean stream usage option is rejected");
+
+    RunResult usage_result;
+    usage_result.summary.n_prompt = 3;
+    usage_result.summary.n_generated = 2;
+    const json usage = completion_usage(usage_result);
+    check(usage.value("prompt_tokens", -1) == 3 && usage.value("completion_tokens", -1) == 2 &&
+              usage.value("total_tokens", -1) == 5,
+          "usage has OpenAI token totals");
+    const json usage_chunk =
+        make_stream_usage("chatcmpl-usage", "chat.completion.chunk", 1, "local-model", usage_result);
+    check(usage_chunk["choices"].empty() && usage_chunk["usage"].value("total_tokens", -1) == 5,
+          "final SSE usage chunk has empty choices and populated usage");
+    check(std::string(completion_finish_reason(usage_result, 2)) == "length", "token-limit completions report length");
+    check(std::string(completion_finish_reason(usage_result, 3)) == "stop", "early completions report stop");
 
     int sockets[2] = {-1, -1};
     check(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0, "socketpair opens");

@@ -179,9 +179,8 @@ rebases that 1-commit branch onto the new upstream tag, re-pushes it, and re-pin
 git fetch upstream && git checkout bmoe/expert-ready-hook
 git rebase <newer-upstream-tag> && git push --force-with-lease origin bmoe/expert-ready-hook
 
-# in this repo: move the submodule to the rebased commit, rebuild, run the gates
-cd third_party/llama.cpp && git fetch origin && git checkout <rebased-commit>
-cd ../.. && git add third_party/llama.cpp && scripts/build-host.sh
+# in this repo: pin the latest bmoe/expert-ready-hook commit, rebuild, run the gates
+scripts/sync-llama.sh && scripts/build-host.sh
 cd build && ctest --output-on-failure     # gates must stay green
 ```
 
@@ -198,7 +197,5 @@ output. Each supported architecture adds one more gate to keep green across a bu
 If a future release moves the two hooks (a stable expert-residency API, say) upstream,
 this seam shrinks further or disappears — `core/` does not change.
 
-Pinned submodule at the time of writing: `Indoroid/llama.cpp` branch
-`bmoe/expert-ready-hook`, commit `037aba22f` - the single expert-ready-hook commit (section 3)
-on top of `Indoroid/llama.cpp` master `822e17134` (see `.gitmodules` /
-`git submodule status` for the current pin).
+The submodule tracks only the `Indoroid/llama.cpp` branch `bmoe/expert-ready-hook`; see
+`.gitmodules` and `git submodule status` for the current pin.

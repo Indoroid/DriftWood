@@ -333,6 +333,7 @@ static std::string extract_last_user_message(const std::string & body) {
 }
 
 struct ApiCompletionRequest {
+    std::string model;
     std::string prompt;
     std::vector<ChatMessage> messages;
     std::vector<ChatTool> tools;
@@ -340,6 +341,7 @@ struct ApiCompletionRequest {
     bool parallel_tool_calls = false;
     int n_predict = 128;
     bool stream = false;
+    bool stream_include_usage = false;
     SamplingConfig sampling;
     std::optional<bool> think;
     std::string reasoning_effort;
@@ -436,6 +438,13 @@ static bool parse_completion_request(const std::string & body,
     out = {};
     out.sampling = defaults;
     out.n_predict = default_n_predict;
+    if (root.contains("model")) {
+        if (!root["model"].is_string() || root["model"].get<std::string>().empty()) {
+            error = "model must be a non-empty string";
+            return false;
+        }
+        out.model = root["model"].get<std::string>();
+    }
     if (root.contains("think")) {
         if (!root["think"].is_boolean()) {
             error = "think must be a boolean";
@@ -616,6 +625,20 @@ static bool parse_completion_request(const std::string & body,
         }
         out.stream = root["stream"].get<bool>();
     }
+    if (root.contains("stream_options")) {
+        if (!root["stream_options"].is_object()) {
+            error = "stream_options must be an object";
+            return false;
+        }
+        const json & options = root["stream_options"];
+        if (options.contains("include_usage")) {
+            if (!options["include_usage"].is_boolean()) {
+                error = "stream_options.include_usage must be a boolean";
+                return false;
+            }
+            out.stream_include_usage = options["include_usage"].get<bool>();
+        }
+    }
     if (root.contains("temperature")) {
         if (!root["temperature"].is_number()) {
             error = "temperature must be numeric";
@@ -783,12 +806,12 @@ static void send_sse_done(int fd) {
 
 static void send_json_error(int fd, int status, const char * msg, bool ka) {
     const char * type = status == 400 ? "invalid_request_error" : "api_error";
-    std::string body = "{\"error\":{\"message\":\"" + json_escape(msg) + "\",\"type\":\"" + type + "\"}}";
+    const json body = {{"error", {{"message", msg}, {"type", type}, {"param", nullptr}, {"code", nullptr}}}};
     const char * text = status >= 500   ? "Internal Server Error"
                         : status == 400 ? "Bad Request"
                         : status == 404 ? "Not Found"
                                         : "Error";
-    send_response(fd, status, text, "application/json", body, ka);
+    send_response(fd, status, text, "application/json", body.dump(), ka);
 }
 
 // ── Server state ─────────────────────────────────────────────────────────────
@@ -815,13 +838,31 @@ struct ServerState {
 
 // ── Request handlers ─────────────────────────────────────────────────────────
 
+static json make_stream_response(const std::string & id,
+                                 const std::string & object,
+                                 long created,
+                                 const std::string & model,
+                                 json choices,
+                                 bool include_usage) {
+    json chunk = {{"id", id},
+                  {"object", object},
+                  {"created", created},
+                  {"model", model},
+                  {"system_fingerprint", nullptr},
+                  {"choices", std::move(choices)}};
+    if (include_usage) chunk["usage"] = nullptr;
+    return chunk;
+}
+
 static std::string make_stream_delta(bool chat,
                                      const std::string & id,
                                      const std::string & object,
                                      long created,
+                                     const std::string & model,
                                      const std::string & piece,
-                                     const std::string & reasoning = {}) {
-    json choice = {{"index", 0}, {"finish_reason", nullptr}};
+                                     const std::string & reasoning = {},
+                                     bool include_usage = false) {
+    json choice = {{"index", 0}, {"finish_reason", nullptr}, {"logprobs", nullptr}};
     if (chat) {
         json delta = json::object();
         if (!piece.empty()) delta["content"] = piece;
@@ -829,14 +870,36 @@ static std::string make_stream_delta(bool chat,
         choice["delta"] = std::move(delta);
     } else {
         choice["text"] = piece;
-        choice["logprobs"] = nullptr;
     }
-    return json({{"id", id},
-                 {"object", object},
-                 {"created", created},
-                 {"model", "bmoe"},
-                 {"choices", json::array({std::move(choice)})}})
+    return make_stream_response(id, object, created, model, json::array({std::move(choice)}), include_usage)
         .dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+static json completion_usage(const RunResult & result) {
+    return {{"prompt_tokens", result.summary.n_prompt},
+            {"completion_tokens", result.summary.n_generated},
+            {"total_tokens", result.summary.n_prompt + result.summary.n_generated}};
+}
+
+static const char * completion_finish_reason(const RunResult & result, int n_predict) {
+    if (!result.tool_calls.empty()) return "tool_calls";
+    return result.summary.n_generated >= n_predict ? "length" : "stop";
+}
+
+static json make_stream_usage(const std::string & id,
+                              const std::string & object,
+                              long created,
+                              const std::string & model,
+                              const RunResult & result) {
+    json chunk = make_stream_response(id, object, created, model, json::array(), false);
+    chunk["usage"] = completion_usage(result);
+    return chunk;
+}
+
+static std::string loaded_model_id(const ServerState & state) {
+    const std::string & path = state.session_cfg.model_path;
+    const size_t sep = path.find_last_of("/\\");
+    return sep == std::string::npos ? path : path.substr(sep + 1);
 }
 
 struct StreamTextState {
@@ -896,12 +959,7 @@ static void handle_request(int fd, const HttpRequest & req, ServerState & state)
             send_json_error(fd, 500, "Model not loaded", ka);
             return;
         }
-        std::string model_id = "model";
-        const std::string & mp = state.session_cfg.model_path;
-        size_t slash = mp.rfind('/');
-        size_t bslash = mp.rfind('\\');
-        size_t sep = (slash != std::string::npos) ? slash : bslash;
-        if (sep != std::string::npos && sep + 1 < mp.size()) model_id = mp.substr(sep + 1);
+        const std::string model_id = loaded_model_id(state);
 
         std::string body = "{\"object\":\"list\",\"data\":[{"
                            "\"id\":\"" +
@@ -980,6 +1038,7 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
     greq.override_sampling = true;
     greq.sampling = api.sampling;
     long created = static_cast<long>(std::time(nullptr));
+    const std::string response_model = api.model.empty() ? loaded_model_id(state) : api.model;
     const std::string request_tag =
         std::to_string(created) + "_" + std::to_string(response_sequence.fetch_add(1, std::memory_order_relaxed));
     ProgressDelta progress;
@@ -1001,7 +1060,7 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
 
         json choice;
         if (chat) {
-            json message = {{"role", "assistant"}, {"content", result.generated_text}};
+            json message = {{"role", "assistant"}, {"content", result.generated_text}, {"refusal", nullptr}};
             if (!result.reasoning_text.empty()) message["reasoning_content"] = result.reasoning_text;
             if (!result.tool_calls.empty()) {
                 message["tool_calls"] = json::array();
@@ -1015,19 +1074,21 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
             }
             choice = {{"index", 0},
                       {"message", std::move(message)},
-                      {"finish_reason", result.tool_calls.empty() ? "stop" : "tool_calls"}};
+                      {"finish_reason", completion_finish_reason(result, greq.n_predict)},
+                      {"logprobs", nullptr}};
         } else {
-            choice = {{"text", result.generated_text}, {"index", 0}, {"finish_reason", "stop"}, {"logprobs", nullptr}};
+            choice = {{"text", result.generated_text},
+                      {"index", 0},
+                      {"finish_reason", completion_finish_reason(result, greq.n_predict)},
+                      {"logprobs", nullptr}};
         }
         const json body = {{"id", id_prefix + "-" + request_tag},
                            {"object", object},
                            {"created", created},
-                           {"model", "bmoe"},
+                           {"model", response_model},
+                           {"system_fingerprint", nullptr},
                            {"choices", json::array({std::move(choice)})},
-                           {"usage",
-                            {{"prompt_tokens", result.summary.n_prompt},
-                             {"completion_tokens", result.summary.n_generated},
-                             {"total_tokens", result.summary.n_prompt + result.summary.n_generated}}}};
+                           {"usage", completion_usage(result)}};
         send_response(fd, 200, "OK", "application/json", body.dump(-1, ' ', false, json::error_handler_t::replace),
                       false);
         return;
@@ -1041,35 +1102,29 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
 
     // For chat, send the role first
     if (chat) {
-        std::string data = "{\"id\":\"" + id_prefix + "-" + request_tag +
-                           "\","
-                           "\"object\":\"" +
-                           object +
-                           "\","
-                           "\"created\":" +
-                           std::to_string(created) +
-                           ","
-                           "\"model\":\"bmoe\","
-                           "\"choices\":[{"
-                           "\"index\":0,"
-                           "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
-                           "\"finish_reason\":null"
-                           "}]}";
-        send_sse(fd, data);
+        const json choice = {{"index", 0},
+                             {"delta", {{"role", "assistant"}, {"content", ""}}},
+                             {"finish_reason", nullptr},
+                             {"logprobs", nullptr}};
+        send_sse(fd, make_stream_response(id_prefix + "-" + request_tag, object, created, response_model,
+                                          json::array({choice}), api.stream_include_usage)
+                         .dump(-1, ' ', false, json::error_handler_t::replace));
     }
 
     StreamTextState streamed_text;
     auto on_token = [&](const TokenMetrics & m) {
         progress_token(m);
         if (!chat) {
-            send_sse(fd, make_stream_delta(false, id_prefix + "-" + request_tag, object, created, m.piece));
+            send_sse(fd, make_stream_delta(false, id_prefix + "-" + request_tag, object, created, response_model,
+                                           m.piece, {}, api.stream_include_usage));
             return;
         }
         json delta = json::object();
         add_stream_text_delta(delta, m, streamed_text);
         if (!delta.empty()) {
-            send_sse(fd, make_stream_delta(true, id_prefix + "-" + request_tag, object, created,
-                                           delta.value("content", ""), delta.value("reasoning_content", "")));
+            send_sse(fd, make_stream_delta(true, id_prefix + "-" + request_tag, object, created, response_model,
+                                           delta.value("content", ""), delta.value("reasoning_content", ""),
+                                           api.stream_include_usage));
         }
     };
 
@@ -1092,40 +1147,34 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
                 }
             }
             if (!delta.empty()) {
-                const json buffered = {
-                    {"id", id_prefix + "-" + request_tag},
-                    {"object", object},
-                    {"created", created},
-                    {"model", "bmoe"},
-                    {"choices", json::array({{{"index", 0},
-                                                {"delta", std::move(delta)},
-                                                {"finish_reason", nullptr}}})}};
+                const json choice = {
+                    {"index", 0}, {"delta", std::move(delta)}, {"finish_reason", nullptr}, {"logprobs", nullptr}};
+                const json buffered =
+                    make_stream_response(id_prefix + "-" + request_tag, object, created, response_model,
+                                         json::array({choice}), api.stream_include_usage);
                 send_sse(fd, buffered.dump(-1, ' ', false, json::error_handler_t::replace));
             }
         }
 
-        json choice = {{"index", 0}, {"finish_reason", result.tool_calls.empty() ? "stop" : "tool_calls"}};
+        json choice = {
+            {"index", 0}, {"finish_reason", completion_finish_reason(result, greq.n_predict)}, {"logprobs", nullptr}};
         if (chat)
             choice["delta"] = json::object();
         else {
             choice["text"] = "";
-            choice["logprobs"] = nullptr;
         }
-        const json data = {
-            {"id", id_prefix + "-" + request_tag},
-            {"object", object},
-            {"created", created},
-            {"model", "bmoe"},
-            {"choices", json::array({std::move(choice)})},
-            {"usage",
-             {{"prompt_tokens", result.summary.n_prompt},
-              {"completion_tokens", result.summary.n_generated},
-              {"total_tokens", result.summary.n_prompt + result.summary.n_generated}}},
-        };
+        const json data = make_stream_response(id_prefix + "-" + request_tag, object, created, response_model,
+                                               json::array({std::move(choice)}), api.stream_include_usage);
         send_sse(fd, data.dump(-1, ' ', false, json::error_handler_t::replace));
+        if (api.stream_include_usage) {
+            const json usage =
+                make_stream_usage(id_prefix + "-" + request_tag, object, created, response_model, result);
+            send_sse(fd, usage.dump(-1, ' ', false, json::error_handler_t::replace));
+        }
         send_sse_done(fd);
     } else {
-        const json error = {{"error", {{"message", result.error}, {"type", "api_error"}}}};
+        const json error = {
+            {"error", {{"message", result.error}, {"type", "api_error"}, {"param", nullptr}, {"code", nullptr}}}};
         send_sse(fd, error.dump(-1, ' ', false, json::error_handler_t::replace));
         send_sse_done(fd);
     }
