@@ -6,7 +6,35 @@ Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **Test registration restored.** CTest once again builds and runs the config, chat, thinking,
+  n-gram, server API, CLI/server parity, and (when NumPy is available) MoE byte-identity gates.
+  Fixture generation uses llama.cpp's vendored `gguf-py`, missing Python dependencies skip only
+  the model-backed gates, the route-ahead passthrough check uses the measured commit count for deep
+  models, and the stale target for nonexistent `session_cli_test.cpp` was removed.
+- **Relocated host builds.** `scripts/build-host.sh` now refreshes a stale CMake build
+  directory whose cache points at a different checkout path.
+
 ### Added
+- **Multimodal CLI and OpenAI server input.** The engine can load a llama.cpp mtmd projector with
+  `--mmproj`, prefill ordered image/audio embeddings, and continue generation through the existing
+  MoE streaming path. `bmoe-cli` accepts repeatable one-shot `--image`, `--audio`, and `--media`
+  files; `bmoe-server` accepts OpenAI `image_url` data URLs and `input_audio` base64 content parts.
+  Remote URLs are not fetched, request/media sizes are bounded, and unsupported combinations fail
+  explicitly. See `docs/multimodal.md`.
+- **Detailed bmoe-server command reference.** Server help now describes every applicable CLI option
+  individually, while the parity gate excludes only file-backed media flags whose server equivalent
+  is request content. Deprecated dense-weight aliases remain compatible and are labeled
+  `[DEPRECATED]` in both help outputs.
+- **pi-driftwood extension.** Added a standalone pi-coding-agent provider for the local
+  `bmoe-server`, covering model discovery, OpenAI-compatible streaming chat, reasoning,
+  tools, tool results, multi-turn history, and `/bmoe-version` without backend selection
+  or environment-variable configuration.
+- **Runtime reasoning, template, and KV controls.** `bmoe-cli`, `bmoe-cli --session`, and
+  `bmoe-server` now support request-local thinking/effort; `bmoe-server` also accepts a
+  template-delimited `reasoning_budget_tokens` cap; complete chat transcripts and generic
+  JSON `chat_template_kwargs`, startup custom templates, and session-scoped KV-cache types with
+  Flash Attention selection. Existing flags and request shapes remain valid.
 - **`bmoe-server` — HTTP server mode.** A new `bmoe-server` binary (alongside `bmoe-cli`) that
   loads a model once and serves it over HTTP on a configurable port. Exposes an OpenAI-compatible
   REST API: `GET /v1/models`, `POST /v1/completions`, and `POST /v1/chat/completions`, with
@@ -23,8 +51,25 @@ Semantic Versioning.
   tool-result messages, tool choice, and parallel-call policy through the model-owned Jinja template.
   Parsed model calls return as standard OpenAI `tool_calls` in non-streaming and SSE responses, with
   deterministic IDs when the model format supplies none.
+- **BMOE chat SSE output.** Chat requests now stream parser-confirmed answer and reasoning deltas
+  even when pi supplies tool definitions; tool-call markup remains withheld until the call is complete.
+- **OpenAI wire-format parity.** Completion responses and SSE chunks now echo the requested model and
+  include the standard choice, fingerprint, error, and usage fields. Streaming usage follows
+  `stream_options.include_usage` with a separate final `choices: []` chunk before `[DONE]`.
 
 ### Fixed
+- **Pinned llama.cpp sync.** `scripts/sync-llama.sh` now advances the submodule only along the
+  `Indoroid/llama.cpp` `bmoe/expert-ready-hook` branch configured in `.gitmodules`.
+- **`--overlap` hook restored on the current llama.cpp fork.** The submodule now pins the
+  one-commit `bmoe/expert-ready-hook` branch on top of the merged BailingMoe3 llama.cpp changes,
+  so CPU expert matmuls can wait for streamed slices instead of rejecting overlap at startup.
+- **Bounded server compute-buffer reservation.** `bmoe-server` and `bmoe-cli` now default to a
+  2048-token logical batch and a 512-token physical batch, expose upstream-style `--batch-size`
+  and `--ubatch-size` controls, and cap both to the configured context. The old `--ubatch` spelling
+  remains an alias.
+- **Current llama.cpp model-load API.** The engine now requests mmap through
+  `LLAMA_LOAD_MODE_MMAP`, preserving the native-layout invariant after upstream removed the
+  `use_mmap` field.
 - **`bmoe-server` handles OpenAI SDK request formats.** Accepts `max_completion_tokens` (sent by the
   OpenAI/Node SDK as `max_completion_tokens`) in addition to `max_tokens`.
 - **`bmoe-server` handles `content` as a message content array.** Some OpenAI-compatible SDKs
@@ -51,6 +96,20 @@ Semantic Versioning.
 - **Portable server runtime linkage.** The build-tree server finds llama/ggml shared libraries via
   `$ORIGIN/../bin`; moving or extracting a build no longer leaves an absolute CMake RUNPATH pointing
   at the machine that compiled it.
+
+## [0.20.0] - 2026-08-17
+
+### Added
+- **Ling 3.0 (`bailingmoe3`) recipe.** Ling-3.0-flash (127B total, ~5B active) routes over 512
+  experts with a per-expert bias (the `lfm2moe` pattern) plus one always-on shared expert that
+  stays resident; the experts name the standard split suffixes, so streaming is one registry row.
+  The leading dense blocks never bind, and the trailing NextN/MTP block names expert tensors but
+  is not loaded by default, so it never streams. The hybrid KDA/MLA attention stack is dense-side
+  llama.cpp code, invisible to the streaming seam.
+
+### Changed
+- **llama.cpp integration updated** for BailingMoE3 support while retaining the single expert-ready
+  hook commit on `bmoe/expert-ready-hook`. App version 0.20.0 (versionCode 35).
 
 ## [0.19.0] - 2026-08-01
 

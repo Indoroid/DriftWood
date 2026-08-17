@@ -1,5 +1,6 @@
 #include "bmoe/runtime.h"
 #include "bmoe/session.h"
+#include "../multimodal/media_io.h"
 
 #include <string>
 
@@ -11,14 +12,19 @@ SessionConfig session_config_from(const RunConfig & cfg) {
     sc.model_path = cfg.model_path;
     sc.n_threads = cfg.n_threads;
     sc.n_ctx = cfg.n_ctx;
-    sc.n_batch = cfg.n_ctx;     // one-batch prefill for any prompt that fits the context
-    sc.n_ubatch = cfg.n_ubatch; // 0 = follow n_batch; smaller trades prefill speed for memory
-    sc.chatml = cfg.chatml;
+    sc.n_batch = cfg.n_batch;
+    sc.n_ubatch = cfg.n_ubatch;
+    sc.chatml = cfg.chatml || !cfg.chat_template.empty() || !cfg.system_prompt.empty();
+    sc.chat_template = cfg.chat_template;
+    sc.cache_type_k = cfg.cache_type_k;
+    sc.cache_type_v = cfg.cache_type_v;
+    sc.flash_attention = cfg.flash_attention;
     sc.n_expert_used = cfg.n_expert_used; // active-expert (top-k) override; 0 = model default
     sc.compute_trace_layers = cfg.compute_trace_layers;
     sc.sampling = cfg.sampling; // greedy by default; opt-in stochastic decoding
     sc.moe = cfg.moe;
     sc.spec = cfg.spec; // self-speculation (MTP head or n-gram lookup); off by default
+    sc.multimodal = cfg.multimodal;
     return sc;
 }
 
@@ -51,8 +57,23 @@ RunResult run(const RunConfig & cfg,
 
     GenerateRequest req;
     req.prompt = cfg.prompt;
+    for (const std::string & path : cfg.media_paths) {
+        MediaInput input;
+        std::string media_error;
+        if (!load_media_file(path, input, media_error)) {
+            RunResult r;
+            r.error = media_error;
+            return r;
+        }
+        req.media.push_back(std::move(input));
+    }
     req.n_predict = cfg.n_predict;
     req.think = cfg.think;
+    req.reasoning_effort = cfg.reasoning_effort;
+    if (!cfg.system_prompt.empty()) {
+        req.chatml = true;
+        req.messages = {{"system", cfg.system_prompt}, {"user", cfg.prompt}};
+    }
     req.clear_kv = true;
     // Only --progress reads the per-token parsed answer; the plain path writes `piece` as it goes,
     // and a benchmark run reads neither. Building it re-parses the whole generation every token, so

@@ -23,6 +23,7 @@
 #include "bmoe/runtime.h"
 #include "bmoe/session.h"
 #include "bmoe/version.h"
+#include "base64.hpp"
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
@@ -34,9 +35,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -56,6 +60,25 @@ using json = nlohmann::json;
 static std::string json_escape(const std::string & s) {
     std::string quoted = json(s).dump(-1, ' ', false, json::error_handler_t::replace);
     return quoted.size() >= 2 ? quoted.substr(1, quoted.size() - 2) : std::string{};
+}
+
+static bool read_text_file(const std::string & path, std::string & out, std::string & error) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        error = "cannot read " + path;
+        return false;
+    }
+    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return true;
+}
+
+static std::string normalize_reasoning_effort(std::string value) {
+    std::string lower = value;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (lower == "low" || lower == "medium" || lower == "high" || lower == "none") return lower;
+    return value;
 }
 
 struct ProgressDelta {
@@ -311,33 +334,221 @@ static std::string extract_last_user_message(const std::string & body) {
 }
 
 struct ApiCompletionRequest {
+    std::string model;
     std::string prompt;
     std::vector<ChatMessage> messages;
+    std::vector<MediaInput> media;
     std::vector<ChatTool> tools;
     ChatToolChoice tool_choice = ChatToolChoice::Auto;
     bool parallel_tool_calls = false;
     int n_predict = 128;
     bool stream = false;
+    bool stream_include_usage = false;
     SamplingConfig sampling;
+    std::optional<bool> think;
+    std::string reasoning_effort;
+    std::optional<int> reasoning_budget_tokens;
+    std::map<std::string, std::string> chat_template_kwargs;
 };
 
-static bool parse_message_content(const json & value, std::string & out) {
-    if (value.is_null()) {
-        out.clear();
-        return true;
-    }
-    if (value.is_string()) {
-        out = value.get<std::string>();
-        return true;
-    }
-    if (!value.is_array()) return false;
+static constexpr size_t k_max_media_item_bytes = 32ull * 1024ull * 1024ull;
+static constexpr size_t k_max_media_total_bytes = 64ull * 1024ull * 1024ull;
 
-    out.clear();
+static bool decode_base64_media(const std::string & encoded,
+                                const std::string & name,
+                                std::vector<MediaInput> & media,
+                                std::string & error) {
+    std::string decoded;
+    try {
+        decoded = base64::decode(encoded);
+    } catch (const std::exception & e) {
+        error = "invalid base64 media payload: " + std::string(e.what());
+        return false;
+    }
+    if (decoded.empty()) {
+        error = "media payload is empty";
+        return false;
+    }
+    if (decoded.size() > k_max_media_item_bytes) {
+        error = "decoded media item exceeds 32 MiB";
+        return false;
+    }
+    size_t total = decoded.size();
+    for (const MediaInput & existing : media) total += existing.bytes.size();
+    if (total > k_max_media_total_bytes) {
+        error = "decoded media payloads exceed 64 MiB total";
+        return false;
+    }
+
+    MediaInput input;
+    input.name = name;
+    input.bytes.assign(reinterpret_cast<const std::uint8_t *>(decoded.data()),
+                       reinterpret_cast<const std::uint8_t *>(decoded.data() + decoded.size()));
+    media.push_back(std::move(input));
+    return true;
+}
+
+static bool decode_data_url(const std::string & url,
+                            std::vector<MediaInput> & media,
+                            std::string & error) {
+    if (url.rfind("data:", 0) != 0) {
+        error = "remote image URLs are not supported; send image_url.url as a data:...;base64 URL";
+        return false;
+    }
+    const size_t comma = url.find(',');
+    if (comma == std::string::npos || comma <= 5) {
+        error = "invalid media data URL";
+        return false;
+    }
+    const std::string meta = url.substr(5, comma - 5);
+    if (meta.find(";base64") == std::string::npos) {
+        error = "media data URL must use base64 encoding";
+        return false;
+    }
+    return decode_base64_media(url.substr(comma + 1), meta, media, error);
+}
+
+static bool parse_message_content(const json & value,
+                                  ChatMessage & message,
+                                  std::vector<MediaInput> & media,
+                                  std::string & error) {
+    message.content.clear();
+    message.content_parts.clear();
+    if (value.is_null()) return true;
+    if (value.is_string()) {
+        message.content = value.get<std::string>();
+        return true;
+    }
+    if (!value.is_array()) {
+        error = "Message content must be a string or content-part array";
+        return false;
+    }
+
     for (const json & part : value) {
-        if (!part.is_object()) return false;
+        if (!part.is_object()) {
+            error = "Each message content part must be an object";
+            return false;
+        }
+        if (part.contains("type") && !part["type"].is_string()) {
+            error = "message content part type must be a string";
+            return false;
+        }
         const std::string type = part.value("type", "text");
-        if (type != "text" || !part.contains("text") || !part["text"].is_string()) continue;
-        out += part["text"].get<std::string>();
+        if (type == "text") {
+            if (!part.contains("text") || !part["text"].is_string()) {
+                error = "text content part needs a string text field";
+                return false;
+            }
+            ChatContentPart content;
+            content.kind = ChatContentKind::Text;
+            content.text = part["text"].get<std::string>();
+            message.content += content.text; // raw fallback for models without a usable template
+            message.content_parts.push_back(std::move(content));
+            continue;
+        }
+
+        if (type == "image_url" || type == "input_image") {
+            std::string url;
+            if (part.contains("image_url")) {
+                const json & image_url = part["image_url"];
+                if (image_url.is_string()) url = image_url.get<std::string>();
+                else if (image_url.is_object() && image_url.contains("url") && image_url["url"].is_string())
+                    url = image_url["url"].get<std::string>();
+            }
+            if (url.empty() && part.contains("url") && part["url"].is_string())
+                url = part["url"].get<std::string>();
+            if (url.empty()) {
+                error = type + " content part needs image_url.url (or url)";
+                return false;
+            }
+            const size_t media_index = media.size();
+            if (!decode_data_url(url, media, error)) return false;
+            ChatContentPart content;
+            content.kind = ChatContentKind::Media;
+            content.media_index = media_index;
+            message.content_parts.push_back(std::move(content));
+            continue;
+        }
+
+        if (type == "input_audio" || type == "audio") {
+            const json * audio = nullptr;
+            if (part.contains("input_audio") && part["input_audio"].is_object()) audio = &part["input_audio"];
+            else if (part.contains("audio") && part["audio"].is_object()) audio = &part["audio"];
+            else if (part.contains("data")) audio = &part;
+            if (!audio || !audio->contains("data") || !(*audio)["data"].is_string()) {
+                error = type + " content part needs base64 audio data";
+                return false;
+            }
+            if (audio->contains("format") && !(*audio)["format"].is_string()) {
+                error = type + " content part format must be a string";
+                return false;
+            }
+            const std::string format = audio->value("format", "audio");
+            const size_t media_index = media.size();
+            if (!decode_base64_media((*audio)["data"].get<std::string>(), "audio/" + format, media, error))
+                return false;
+            ChatContentPart content;
+            content.kind = ChatContentKind::Media;
+            content.media_index = media_index;
+            message.content_parts.push_back(std::move(content));
+            continue;
+        }
+
+        // Preserve the server's old tolerance for non-text extension parts. Known media types are
+        // handled above; unknown future OpenAI parts are ignored instead of breaking text clients.
+    }
+    return true;
+}
+
+static bool parse_chat_template_kwargs(const json & value, ApiCompletionRequest & out, std::string & error) {
+    if (!value.is_object()) {
+        error = "chat_template_kwargs must be an object";
+        return false;
+    }
+    std::optional<bool> generic_think;
+    std::optional<std::string> generic_effort;
+    for (auto it = value.begin(); it != value.end(); ++it) {
+        if (it.key().empty() || it.key().size() > 128) {
+            error = "chat_template_kwargs keys must be 1..128 bytes";
+            return false;
+        }
+        if (it.key() == "enable_thinking") {
+            if (!it.value().is_boolean()) {
+                error = "chat_template_kwargs.enable_thinking must be a boolean";
+                return false;
+            }
+            generic_think = it.value().get<bool>();
+        } else if (it.key() == "reasoning_effort") {
+            if (!it.value().is_string()) {
+                error = "chat_template_kwargs.reasoning_effort must be a string";
+                return false;
+            }
+            generic_effort = normalize_reasoning_effort(it.value().get<std::string>());
+            if (generic_effort->empty()) {
+                error = "chat_template_kwargs.reasoning_effort must be non-empty";
+                return false;
+            }
+        } else {
+            out.chat_template_kwargs[it.key()] = it.value().dump();
+        }
+    }
+    if (generic_think) {
+        if (out.think && *out.think != *generic_think) {
+            error = "Conflicting thinking controls: think and chat_template_kwargs.enable_thinking disagree";
+            return false;
+        }
+        out.think = *generic_think;
+    }
+    if (generic_effort) {
+        if (!out.reasoning_effort.empty() && out.reasoning_effort != *generic_effort) {
+            error = "Conflicting reasoning_effort controls";
+            return false;
+        }
+        out.reasoning_effort = *generic_effort;
+    }
+    if (out.reasoning_effort.size() > 64) {
+        error = "reasoning_effort must be at most 64 bytes";
+        return false;
     }
     return true;
 }
@@ -357,6 +568,52 @@ static bool parse_completion_request(const std::string & body,
     out = {};
     out.sampling = defaults;
     out.n_predict = default_n_predict;
+    if (root.contains("model")) {
+        if (!root["model"].is_string() || root["model"].get<std::string>().empty()) {
+            error = "model must be a non-empty string";
+            return false;
+        }
+        out.model = root["model"].get<std::string>();
+    }
+    if (root.contains("think")) {
+        if (!root["think"].is_boolean()) {
+            error = "think must be a boolean";
+            return false;
+        }
+        out.think = root["think"].get<bool>();
+    }
+    if (root.contains("reasoning_effort")) {
+        if (!root["reasoning_effort"].is_string() || root["reasoning_effort"].get<std::string>().empty()) {
+            error = "reasoning_effort must be a non-empty string";
+            return false;
+        }
+        out.reasoning_effort = normalize_reasoning_effort(root["reasoning_effort"].get<std::string>());
+    }
+    for (const char * name : {"reasoning_budget_tokens", "thinking_budget_tokens"}) {
+        if (!root.contains(name)) continue;
+        const json & value = root[name];
+        if (!value.is_number_integer() || value.get<long long>() < -1 ||
+            value.get<long long>() > std::numeric_limits<int>::max()) {
+            error = std::string(name) + " must be an integer in -1.." +
+                    std::to_string(std::numeric_limits<int>::max());
+            return false;
+        }
+        const int budget = value.get<int>();
+        if (out.reasoning_budget_tokens && *out.reasoning_budget_tokens != budget) {
+            error = "Conflicting reasoning budget controls";
+            return false;
+        }
+        out.reasoning_budget_tokens = budget;
+    }
+    if (root.contains("chat_template_kwargs") &&
+        !parse_chat_template_kwargs(root["chat_template_kwargs"], out, error))
+        return false;
+    if (out.reasoning_effort == "none") {
+        out.think = false;
+        out.reasoning_effort.clear();
+    } else if (out.think && !*out.think) {
+        out.reasoning_effort.clear();
+    }
     if (chat) {
         if (!root.contains("messages") || !root["messages"].is_array() || root["messages"].empty()) {
             error = "messages must be a non-empty array";
@@ -369,10 +626,8 @@ static bool parse_completion_request(const std::string & body,
             }
             ChatMessage msg;
             msg.role = item["role"].get<std::string>();
-            if (item.contains("content") && !parse_message_content(item["content"], msg.content)) {
-                error = "Message content must be a string or text-content array";
+            if (item.contains("content") && !parse_message_content(item["content"], msg, out.media, error))
                 return false;
-            }
             msg.reasoning_content = item.value("reasoning_content", "");
             msg.tool_name = item.value("name", "");
             msg.tool_call_id = item.value("tool_call_id", "");
@@ -409,13 +664,20 @@ static bool parse_completion_request(const std::string & body,
             }
             out.messages.push_back(std::move(msg));
         }
+        bool have_user_input = false;
         for (auto it = out.messages.rbegin(); it != out.messages.rend(); ++it) {
-            if (it->role == "user") {
-                out.prompt = it->content; // raw fallback if this model has no chat template
-                break;
+            if (it->role != "user") continue;
+            out.prompt = it->content; // raw text fallback if this model has no chat template
+            have_user_input = !it->content.empty();
+            if (!have_user_input) {
+                have_user_input = std::any_of(it->content_parts.begin(), it->content_parts.end(),
+                                              [](const ChatContentPart & part) {
+                                                  return part.kind == ChatContentKind::Media;
+                                              });
             }
+            break;
         }
-        if (out.prompt.empty()) {
+        if (!have_user_input) {
             error = "messages must contain a non-empty user message";
             return false;
         }
@@ -497,6 +759,20 @@ static bool parse_completion_request(const std::string & body,
             return false;
         }
         out.stream = root["stream"].get<bool>();
+    }
+    if (root.contains("stream_options")) {
+        if (!root["stream_options"].is_object()) {
+            error = "stream_options must be an object";
+            return false;
+        }
+        const json & options = root["stream_options"];
+        if (options.contains("include_usage")) {
+            if (!options["include_usage"].is_boolean()) {
+                error = "stream_options.include_usage must be a boolean";
+                return false;
+            }
+            out.stream_include_usage = options["include_usage"].get<bool>();
+        }
     }
     if (root.contains("temperature")) {
         if (!root["temperature"].is_number()) {
@@ -664,12 +940,13 @@ static void send_sse_done(int fd) {
 }
 
 static void send_json_error(int fd, int status, const char * msg, bool ka) {
-    std::string body = "{\"error\":{\"message\":\"" + json_escape(msg) + "\",\"type\":\"api_error\"}}";
+    const char * type = status == 400 ? "invalid_request_error" : "api_error";
+    const json body = {{"error", {{"message", msg}, {"type", type}, {"param", nullptr}, {"code", nullptr}}}};
     const char * text = status >= 500   ? "Internal Server Error"
                         : status == 400 ? "Bad Request"
                         : status == 404 ? "Not Found"
                                         : "Error";
-    send_response(fd, status, text, "application/json", body, ka);
+    send_response(fd, status, text, "application/json", body.dump(), ka);
 }
 
 // ── Server state ─────────────────────────────────────────────────────────────
@@ -678,9 +955,14 @@ struct ServerConfig {
     std::string host = "127.0.0.1";
     int port = 8080;
     int max_connections = 32;
-    bool disable_think = false;
+    // Base64 media expands request bodies substantially; keep an explicit cap instead of the old
+    // 1 MiB text-only hard limit. The server remains local-only by default.
+    int max_request_mb = 64;
+    bool default_think = true;
+    std::string default_reasoning_effort;
+    std::string default_system_prompt;
     bool completion_chatml = false;
-    bool progress = false;
+    bool progress = true;
 };
 
 struct ServerState {
@@ -694,21 +976,92 @@ struct ServerState {
 
 // ── Request handlers ─────────────────────────────────────────────────────────
 
-static std::string make_stream_delta(
-    bool chat, const std::string & id, const std::string & object, long created, const std::string & piece) {
-    json choice = {{"index", 0}, {"finish_reason", nullptr}};
-    if (chat)
-        choice["delta"] = {{"content", piece}};
-    else {
+static json make_stream_response(const std::string & id,
+                                 const std::string & object,
+                                 long created,
+                                 const std::string & model,
+                                 json choices,
+                                 bool include_usage) {
+    json chunk = {{"id", id},
+                  {"object", object},
+                  {"created", created},
+                  {"model", model},
+                  {"system_fingerprint", nullptr},
+                  {"choices", std::move(choices)}};
+    if (include_usage) chunk["usage"] = nullptr;
+    return chunk;
+}
+
+static std::string make_stream_delta(bool chat,
+                                     const std::string & id,
+                                     const std::string & object,
+                                     long created,
+                                     const std::string & model,
+                                     const std::string & piece,
+                                     const std::string & reasoning = {},
+                                     bool include_usage = false) {
+    json choice = {{"index", 0}, {"finish_reason", nullptr}, {"logprobs", nullptr}};
+    if (chat) {
+        json delta = json::object();
+        if (!piece.empty()) delta["content"] = piece;
+        if (!reasoning.empty()) delta["reasoning_content"] = reasoning;
+        choice["delta"] = std::move(delta);
+    } else {
         choice["text"] = piece;
-        choice["logprobs"] = nullptr;
     }
-    return json({{"id", id},
-                 {"object", object},
-                 {"created", created},
-                 {"model", "bmoe"},
-                 {"choices", json::array({std::move(choice)})}})
+    return make_stream_response(id, object, created, model, json::array({std::move(choice)}), include_usage)
         .dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+static json completion_usage(const RunResult & result) {
+    return {{"prompt_tokens", result.summary.n_prompt},
+            {"completion_tokens", result.summary.n_generated},
+            {"total_tokens", result.summary.n_prompt + result.summary.n_generated}};
+}
+
+static const char * completion_finish_reason(const RunResult & result, int n_predict) {
+    if (!result.tool_calls.empty()) return "tool_calls";
+    return result.summary.n_generated >= n_predict ? "length" : "stop";
+}
+
+static json make_stream_usage(const std::string & id,
+                              const std::string & object,
+                              long created,
+                              const std::string & model,
+                              const RunResult & result) {
+    json chunk = make_stream_response(id, object, created, model, json::array(), false);
+    chunk["usage"] = completion_usage(result);
+    return chunk;
+}
+
+static std::string loaded_model_id(const ServerState & state) {
+    const std::string & path = state.session_cfg.model_path;
+    const size_t sep = path.find_last_of("/\\");
+    return sep == std::string::npos ? path : path.substr(sep + 1);
+}
+
+struct StreamTextState {
+    std::string text;
+    std::string reasoning;
+};
+
+static std::string stream_suffix(const std::string & current, std::string & sent) {
+    if (current.size() >= sent.size() && current.compare(0, sent.size(), sent) == 0) {
+        std::string suffix = current.substr(sent.size());
+        sent = current;
+        return suffix;
+    }
+    // A final parse can reframe an incomplete partial parse. Use the complete parsed value once;
+    // it is safer than dropping the answer, and the common parser normally remains monotonic.
+    sent = current;
+    return current;
+}
+
+static void add_stream_text_delta(json & delta, const TokenMetrics & metrics, StreamTextState & state) {
+    const std::string text = stream_suffix(metrics.text, state.text);
+    const std::string reasoning = stream_suffix(metrics.reasoning, state.reasoning);
+    if (!text.empty()) delta["content"] = text;
+    if (!reasoning.empty()) delta["reasoning_content"] = reasoning;
 }
 
 static std::string response_tool_call_id(const ToolCall & call, size_t index, const std::string & request_tag) {
@@ -744,12 +1097,7 @@ static void handle_request(int fd, const HttpRequest & req, ServerState & state)
             send_json_error(fd, 500, "Model not loaded", ka);
             return;
         }
-        std::string model_id = "model";
-        const std::string & mp = state.session_cfg.model_path;
-        size_t slash = mp.rfind('/');
-        size_t bslash = mp.rfind('\\');
-        size_t sep = (slash != std::string::npos) ? slash : bslash;
-        if (sep != std::string::npos && sep + 1 < mp.size()) model_id = mp.substr(sep + 1);
+        const std::string model_id = loaded_model_id(state);
 
         std::string body = "{\"object\":\"list\",\"data\":[{"
                            "\"id\":\"" +
@@ -799,24 +1147,41 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
         send_json_error(fd, 400, parse_error.c_str(), false);
         return;
     }
+    if (!api.media.empty() && !state.session_cfg.multimodal.enabled()) {
+        send_json_error(fd, 400, "Multimodal content requires bmoe-server --mmproj PATH", false);
+        return;
+    }
 
     // Build generate request
-    const bool buffer_for_tools = chat && !api.tools.empty();
     GenerateRequest greq;
     greq.prompt = std::move(api.prompt);
     greq.messages = std::move(api.messages);
+    greq.media = std::move(api.media);
+    if (chat && !state.srv_cfg.default_system_prompt.empty()) {
+        const bool has_system = std::any_of(greq.messages.begin(), greq.messages.end(), [](const ChatMessage & message) {
+            return message.role == "system";
+        });
+        if (!has_system) greq.messages.insert(greq.messages.begin(), {"system", state.srv_cfg.default_system_prompt});
+    }
     greq.tools = std::move(api.tools);
     greq.tool_choice = api.tool_choice;
     greq.parallel_tool_calls = api.parallel_tool_calls;
     greq.chatml = chat || state.srv_cfg.completion_chatml;
     greq.n_predict = api.n_predict;
-    // OpenAI streaming needs only piece deltas. The optional CLI-compatible progress protocol needs
-    // parsed cumulative text/reasoning, accepting its documented O(n²) rendering cost when enabled.
-    greq.render_text = state.srv_cfg.progress;
-    greq.think = !state.srv_cfg.disable_think;
+    // Chat SSE needs parser-confirmed text so tool-call markup never leaks into normal content.
+    // ponytail: reparses cumulative chat text per token; an incremental parser is the upgrade path
+    // if HTTP generation throughput makes this measurable.
+    greq.render_text = state.srv_cfg.progress || (chat && api.stream);
+    greq.think = api.think.value_or(!api.reasoning_effort.empty() ? true : state.srv_cfg.default_think);
+    greq.reasoning_effort = api.reasoning_effort.empty() ? state.srv_cfg.default_reasoning_effort
+                                                          : api.reasoning_effort;
+    if (!greq.think) greq.reasoning_effort.clear();
+    greq.reasoning_budget_tokens = greq.think ? api.reasoning_budget_tokens.value_or(-1) : -1;
+    greq.chat_template_kwargs = std::move(api.chat_template_kwargs);
     greq.override_sampling = true;
     greq.sampling = api.sampling;
     long created = static_cast<long>(std::time(nullptr));
+    const std::string response_model = api.model.empty() ? loaded_model_id(state) : api.model;
     const std::string request_tag =
         std::to_string(created) + "_" + std::to_string(response_sequence.fetch_add(1, std::memory_order_relaxed));
     ProgressDelta progress;
@@ -838,7 +1203,7 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
 
         json choice;
         if (chat) {
-            json message = {{"role", "assistant"}, {"content", result.generated_text}};
+            json message = {{"role", "assistant"}, {"content", result.generated_text}, {"refusal", nullptr}};
             if (!result.reasoning_text.empty()) message["reasoning_content"] = result.reasoning_text;
             if (!result.tool_calls.empty()) {
                 message["tool_calls"] = json::array();
@@ -852,19 +1217,21 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
             }
             choice = {{"index", 0},
                       {"message", std::move(message)},
-                      {"finish_reason", result.tool_calls.empty() ? "stop" : "tool_calls"}};
+                      {"finish_reason", completion_finish_reason(result, greq.n_predict)},
+                      {"logprobs", nullptr}};
         } else {
-            choice = {{"text", result.generated_text}, {"index", 0}, {"finish_reason", "stop"}, {"logprobs", nullptr}};
+            choice = {{"text", result.generated_text},
+                      {"index", 0},
+                      {"finish_reason", completion_finish_reason(result, greq.n_predict)},
+                      {"logprobs", nullptr}};
         }
         const json body = {{"id", id_prefix + "-" + request_tag},
                            {"object", object},
                            {"created", created},
-                           {"model", "bmoe"},
+                           {"model", response_model},
+                           {"system_fingerprint", nullptr},
                            {"choices", json::array({std::move(choice)})},
-                           {"usage",
-                            {{"prompt_tokens", result.summary.n_prompt},
-                             {"completion_tokens", result.summary.n_generated},
-                             {"total_tokens", result.summary.n_prompt + result.summary.n_generated}}}};
+                           {"usage", completion_usage(result)}};
         send_response(fd, 200, "OK", "application/json", body.dump(-1, ' ', false, json::error_handler_t::replace),
                       false);
         return;
@@ -878,35 +1245,40 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
 
     // For chat, send the role first
     if (chat) {
-        std::string data = "{\"id\":\"" + id_prefix + "-" + request_tag +
-                           "\","
-                           "\"object\":\"" +
-                           object +
-                           "\","
-                           "\"created\":" +
-                           std::to_string(created) +
-                           ","
-                           "\"model\":\"bmoe\","
-                           "\"choices\":[{"
-                           "\"index\":0,"
-                           "\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
-                           "\"finish_reason\":null"
-                           "}]}";
-        send_sse(fd, data);
+        const json choice = {{"index", 0},
+                             {"delta", {{"role", "assistant"}, {"content", ""}}},
+                             {"finish_reason", nullptr},
+                             {"logprobs", nullptr}};
+        send_sse(fd, make_stream_response(id_prefix + "-" + request_tag, object, created, response_model,
+                                          json::array({choice}), api.stream_include_usage)
+                         .dump(-1, ' ', false, json::error_handler_t::replace));
     }
 
+    StreamTextState streamed_text;
     auto on_token = [&](const TokenMetrics & m) {
         progress_token(m);
-        if (!buffer_for_tools)
-            send_sse(fd, make_stream_delta(chat, id_prefix + "-" + request_tag, object, created, m.piece));
+        if (!chat) {
+            send_sse(fd, make_stream_delta(false, id_prefix + "-" + request_tag, object, created, response_model,
+                                           m.piece, {}, api.stream_include_usage));
+            return;
+        }
+        json delta = json::object();
+        add_stream_text_delta(delta, m, streamed_text);
+        if (!delta.empty()) {
+            send_sse(fd, make_stream_delta(true, id_prefix + "-" + request_tag, object, created, response_model,
+                                           delta.value("content", ""), delta.value("reasoning_content", ""),
+                                           api.stream_include_usage));
+        }
     };
 
     auto result = state.session->generate(greq, on_token, state.metrics);
     if (result) {
-        if (buffer_for_tools) {
+        if (chat) {
             json delta = json::object();
-            if (!result.generated_text.empty()) delta["content"] = result.generated_text;
-            if (!result.reasoning_text.empty()) delta["reasoning_content"] = result.reasoning_text;
+            const std::string text = stream_suffix(result.generated_text, streamed_text.text);
+            const std::string reasoning = stream_suffix(result.reasoning_text, streamed_text.reasoning);
+            if (!text.empty()) delta["content"] = text;
+            if (!reasoning.empty()) delta["reasoning_content"] = reasoning;
             if (!result.tool_calls.empty()) {
                 delta["tool_calls"] = json::array();
                 for (size_t i = 0; i < result.tool_calls.size(); ++i) {
@@ -917,37 +1289,35 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
                                                    {"function", {{"name", call.name}, {"arguments", call.arguments}}}});
                 }
             }
-            const json buffered = {
-                {"id", id_prefix + "-" + request_tag},
-                {"object", object},
-                {"created", created},
-                {"model", "bmoe"},
-                {"choices", json::array({{{"index", 0}, {"delta", std::move(delta)}, {"finish_reason", nullptr}}})}};
-            send_sse(fd, buffered.dump(-1, ' ', false, json::error_handler_t::replace));
+            if (!delta.empty()) {
+                const json choice = {
+                    {"index", 0}, {"delta", std::move(delta)}, {"finish_reason", nullptr}, {"logprobs", nullptr}};
+                const json buffered =
+                    make_stream_response(id_prefix + "-" + request_tag, object, created, response_model,
+                                         json::array({choice}), api.stream_include_usage);
+                send_sse(fd, buffered.dump(-1, ' ', false, json::error_handler_t::replace));
+            }
         }
 
-        json choice = {{"index", 0}, {"finish_reason", result.tool_calls.empty() ? "stop" : "tool_calls"}};
+        json choice = {
+            {"index", 0}, {"finish_reason", completion_finish_reason(result, greq.n_predict)}, {"logprobs", nullptr}};
         if (chat)
             choice["delta"] = json::object();
         else {
             choice["text"] = "";
-            choice["logprobs"] = nullptr;
         }
-        const json data = {
-            {"id", id_prefix + "-" + request_tag},
-            {"object", object},
-            {"created", created},
-            {"model", "bmoe"},
-            {"choices", json::array({std::move(choice)})},
-            {"usage",
-             {{"prompt_tokens", result.summary.n_prompt},
-              {"completion_tokens", result.summary.n_generated},
-              {"total_tokens", result.summary.n_prompt + result.summary.n_generated}}},
-        };
+        const json data = make_stream_response(id_prefix + "-" + request_tag, object, created, response_model,
+                                               json::array({std::move(choice)}), api.stream_include_usage);
         send_sse(fd, data.dump(-1, ' ', false, json::error_handler_t::replace));
+        if (api.stream_include_usage) {
+            const json usage =
+                make_stream_usage(id_prefix + "-" + request_tag, object, created, response_model, result);
+            send_sse(fd, usage.dump(-1, ' ', false, json::error_handler_t::replace));
+        }
         send_sse_done(fd);
     } else {
-        const json error = {{"error", {{"message", result.error}, {"type", "api_error"}}}};
+        const json error = {
+            {"error", {{"message", result.error}, {"type", "api_error"}, {"param", nullptr}, {"code", nullptr}}}};
         send_sse(fd, error.dump(-1, ' ', false, json::error_handler_t::replace));
         send_sse_done(fd);
     }
@@ -957,7 +1327,7 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
 
 // Read the full HTTP request from a blocking socket: headers + body.
 // Returns false if the connection closed or the request was too large.
-static bool read_request(int fd, std::string & raw) {
+static bool read_request(int fd, std::string & raw, size_t max_body_bytes) {
     char buf[65536];
     while (true) {
         ssize_t n = read(fd, buf, sizeof(buf));
@@ -997,7 +1367,8 @@ static bool read_request(int fd, std::string & raw) {
                     const unsigned long long parsed = std::strtoull(begin, &end, 10);
                     while (end && *end == ' ')
                         ++end;
-                    if (errno != 0 || end == begin || (end && *end != '\0') || parsed > 1024ull * 1024ull) return false;
+                    if (errno != 0 || end == begin || (end && *end != '\0') || parsed > max_body_bytes)
+                        return false;
                     content_length = (size_t) parsed;
                     have_length = true;
                     break;
@@ -1007,7 +1378,7 @@ static bool read_request(int fd, std::string & raw) {
         }
         if (!have_length) return true;
         if (raw.size() - body_start >= content_length) return true;
-        if (raw.size() > 1024 * 1024) return false;
+        if (raw.size() > body_start + max_body_bytes) return false;
     }
 }
 
@@ -1015,7 +1386,8 @@ static bool read_request(int fd, std::string & raw) {
 // is short-lived. This also avoids dropping a pipelined request after the first parsed body.
 static void process_connection(int fd, ServerState & state) {
     std::string raw;
-    if (!read_request(fd, raw)) return; // connection closed
+    if (!read_request(fd, raw, static_cast<size_t>(state.srv_cfg.max_request_mb) * 1024ull * 1024ull))
+        return; // connection closed or request exceeded configured body cap
 
     HttpRequest req;
     if (!parse_http_request(raw, req)) {
@@ -1033,22 +1405,82 @@ static void print_usage(const char * argv0) {
     std::printf("usage: %s -m <model.gguf> [options]\n"
                 "\n"
                 "  -m, --model PATH        gguf model (required)\n"
+                "  -mm, --mmproj PATH      multimodal projector gguf\n"
+                "      --mmproj-offload     offload projector to GPU when supported (default)\n"
+                "      --no-mmproj-offload  keep projector on CPU\n"
+                "      --image-min-tokens N override projector image token floor\n"
+                "      --image-max-tokens N override projector image token ceiling\n"
+                "      --mtmd-batch-max-tokens N projector output batch limit (default 1024)\n"
                 "      --port N            HTTP server port (default 8080)\n"
                 "      --host ADDR         bind address (default 127.0.0.1; use 0.0.0.0 for\n"
                 "                          remote access)\n"
+                "      --max-request-mb N  maximum HTTP request body (default 64 MiB)\n"
                 "\n"
-                "  bmoe-cli parity (model/session-wide):\n"
-                "  -n, --n-predict, -t, --threads, -c, --ctx-size, --ubatch\n"
-                "  --chatml, --no-think, --temp, --top-k, --top-p, --seed\n"
-                "  --progress, --session\n"
-                "  --mtp, --ngram, --draft, --mtp-p-min, --ngram-min-match\n"
-                "  --csv, --route-trace, --compute-trace, --compute-trace-layers, --io-trace\n"
-                "  --moe-stream, --cache-mb, --cache-floor-mb, --cache-ceil-mb\n"
-                "  --io-threads, --no-odirect, --dense-weights, --load-all, --force-cache\n"
-                "  --overlap, --io-two-wave, --prefetch, --prefetch-sync\n"
-                "  --drop-cold-experts, --drop-no-renorm, --drop-in-prefill\n"
-                "  --route-ahead, --predict-log, --predict-prefetch, --predict-spec-max\n"
-                "  --n-expert-used, --list-archs\n"
+                "  Model and generation (same behavior as bmoe-cli):\n"
+                "  -n, --n-predict N       maximum generated tokens per request (default 128)\n"
+                "  -t, --threads N         CPU compute threads (default 4)\n"
+                "  -c, --ctx-size N        model context size (default 2048)\n"
+                "      --batch-size N      logical prompt-prefill batch size (default 2048)\n"
+                "      --ubatch-size N     maximum physical graph width (default 512; --ubatch alias)\n"
+                "      --n-expert-used N   override routed experts per token; 0 uses the model default\n"
+                "\n"
+                "  Chat and KV cache:\n"
+                "      --chatml            apply the model chat template to /v1/completions too\n"
+                "      --system-prompt TEXT default system message for chat requests\n"
+                "      --system-prompt-file PATH read the default system message from a file\n"
+                "      --no-think          disable reasoning through model template controls\n"
+                "      --reasoning-effort VALUE  default low|medium|high|none reasoning effort\n"
+                "      --chat-template TEXT override the model-provided chat template\n"
+                "      --chat-template-file PATH read the chat-template override from a file\n"
+                "      --cache-type-k TYPE  KV key type: f32,f16,bf16,q8_0,q5_0,q5_1,q4_0,q4_1,iq4_nl\n"
+                "      --cache-type-v TYPE  KV value type; quantized values require Flash Attention\n"
+                "      --flash-attn MODE    Flash Attention policy: auto|on|off (default auto)\n"
+                "\n"
+                "  Sampling:\n"
+                "      --temp F            temperature; <=0 is deterministic greedy decoding\n"
+                "      --top-k N           top-k sampling cutoff; 0 disables this stage\n"
+                "      --top-p F           nucleus sampling cutoff in (0,1]\n"
+                "      --seed N            sampling RNG seed; omitted means random per process\n"
+                "\n"
+                "  Speculative decoding (choose one source):\n"
+                "      --mtp               draft with the model built-in MTP head\n"
+                "      --ngram             draft from repeated token sequences without another model\n"
+                "      --draft N           maximum drafted tokens per verification batch\n"
+                "      --mtp-p-min F       stop MTP drafting below this candidate probability\n"
+                "      --ngram-min-match N minimum repeated-token match allowed to draft\n"
+                "\n"
+                "  Telemetry and diagnostics:\n"
+                "      --progress          emit BMOE progress JSON alongside HTTP responses\n"
+                "      --session           compatibility no-op; the HTTP server is always persistent\n"
+                "      --csv PATH          write per-token metrics as CSV\n"
+                "      --route-trace PATH  record routed experts; requires --moe-stream\n"
+                "      --compute-trace PATH time every graph node; serializes the graph\n"
+                "      --compute-trace-layers PATH aggregate compute timing by layer\n"
+                "      --io-trace PATH     record each expert read; requires --moe-stream\n"
+                "\n"
+                "  MoE expert streaming:\n"
+                "      --moe-stream        keep routed experts on flash and load them on demand\n"
+                "      --cache-mb N|auto   LRU expert-cache budget in MiB; 0 disables it\n"
+                "      --cache-floor-mb N with auto sizing, reserve this much free RAM\n"
+                "      --cache-ceil-mb N  cap auto cache sizing; 0 means no cap\n"
+                "      --io-threads N     parallel expert-read lanes (default 4)\n"
+                "      --no-odirect       use the OS page cache instead of direct expert reads\n"
+                "      --dense-weights M  mmap|warm|anon|ahwb placement for non-expert weights\n"
+                "      [DEPRECATED] --dense-odirect maps to anon; --no-warm-dense maps to mmap\n"
+                "      --load-all         debug baseline: load every expert each token\n"
+                "      --force-cache      permit otherwise rejected pathological cache budgets\n"
+                "      --overlap          overlap expert I/O with FFN compute; needs the hook fork\n"
+                "      --io-two-wave      publish first-projection reads early; needs cache and overlap\n"
+                "      --prefetch K       prefetch the next K layers using prior-token routing\n"
+                "      --prefetch-sync    debug mode that waits for each speculative read\n"
+                "      --drop-cold-experts F  lossy cache-miss drop threshold in (0,1]\n"
+                "      --drop-no-renorm   do not renormalize routing weights after a drop\n"
+                "      --drop-in-prefill  permit cold-expert dropping during prompt prefill\n"
+                "      --route-ahead N    lossy routing substitution N layers early (0..8)\n"
+                "      --predict-log      measure next-layer routing prediction accuracy\n"
+                "      --predict-prefetch prefetch predicted misses and retain predicted hits\n"
+                "      --predict-spec-max N maximum predicted misses read per layer\n"
+                "      --list-archs       print supported MoE architecture recipes and exit\n"
                 "\n"
                 "  -h, --help              show this text and exit\n"
                 "      --version           print the engine version and exit\n"
@@ -1058,11 +1490,15 @@ static void print_usage(const char * argv0) {
                 "  POST /v1/completions      text completion (OpenAI-compatible)\n"
                 "  POST /v1/chat/completions chat completion (OpenAI-compatible)\n"
                 "\n"
+                "  Chat content supports text, image_url data:...;base64, and input_audio base64\n"
+                "  parts when --mmproj is loaded. Remote image URLs are not fetched by this server.\n"
                 "  Both POST endpoints accept stream=true for SSE token streaming.\n"
                 "\n"
                 "Environment:\n"
                 "  BMOE_SERVER_PORT  override --port\n"
                 "  BMOE_SERVER_HOST  override --host\n"
+                "  BMOE_MMPROJ       default --mmproj path\n"
+                "  BMOE_MAX_REQUEST_MB override --max-request-mb\n"
                 "  BMOE_CACHE_MB, BMOE_IO_THREADS, BMOE_OVERLAP, BMOE_PREFETCH,\n"
                 "  BMOE_N_EXPERT_USED, BMOE_PREDICT_LOG and BMOE_PREDICT_PREFETCH also apply\n",
                 argv0);
@@ -1079,6 +1515,14 @@ int main(int argc, char ** argv) {
     std::string route_trace_path;
     std::string compute_trace_path;
     std::string io_trace_path;
+    bool no_think_seen = false;
+    bool reasoning_effort_seen = false;
+    bool system_prompt_seen = false;
+    bool system_prompt_file_seen = false;
+    std::string system_prompt_file;
+    bool chat_template_seen = false;
+    bool chat_template_file_seen = false;
+    std::string chat_template_file;
 
     std::set<std::string> seen;
 
@@ -1095,10 +1539,24 @@ int main(int argc, char ** argv) {
 
         if (a == "-m" || a == "--model")
             cfg.model_path = next("-m");
+        else if (a == "-mm" || a == "--mmproj")
+            cfg.multimodal.mmproj_path = next("--mmproj");
+        else if (a == "--mmproj-offload")
+            cfg.multimodal.offload = true;
+        else if (a == "--no-mmproj-offload")
+            cfg.multimodal.offload = false;
+        else if (a == "--image-min-tokens")
+            cfg.multimodal.image_min_tokens = std::atoi(next("--image-min-tokens"));
+        else if (a == "--image-max-tokens")
+            cfg.multimodal.image_max_tokens = std::atoi(next("--image-max-tokens"));
+        else if (a == "--mtmd-batch-max-tokens")
+            cfg.multimodal.batch_max_tokens = std::atoi(next("--mtmd-batch-max-tokens"));
         else if (a == "--port")
             srv.port = std::atoi(next("--port"));
         else if (a == "--host")
             srv.host = next("--host");
+        else if (a == "--max-request-mb")
+            srv.max_request_mb = std::atoi(next("--max-request-mb"));
         else if (a == "-p" || a == "--prompt") {
             next("-p"); // ignored in server mode
         } else if (a == "-n" || a == "--n-predict")
@@ -1107,8 +1565,10 @@ int main(int argc, char ** argv) {
             cfg.n_threads = std::atoi(next("-t"));
         else if (a == "-c" || a == "--ctx-size")
             cfg.n_ctx = std::atoi(next("-c"));
-        else if (a == "--ubatch")
-            cfg.n_ubatch = std::atoi(next("--ubatch"));
+        else if (a == "--batch-size")
+            cfg.n_batch = std::atoi(next("--batch-size"));
+        else if (a == "--ubatch" || a == "--ubatch-size")
+            cfg.n_ubatch = std::atoi(next("--ubatch-size"));
         else if (a == "--n-expert-used")
             cfg.n_expert_used = std::atoi(next("--n-expert-used"));
         else if (a == "--temp")
@@ -1134,6 +1594,58 @@ int main(int argc, char ** argv) {
             cfg.spec.ngram_min_match = std::atoi(next("--ngram-min-match"));
         else if (a == "--chatml")
             srv.completion_chatml = true;
+        else if (a == "--system-prompt") {
+            if (system_prompt_file_seen) {
+                std::fprintf(stderr, "bmoe-server: --system-prompt conflicts with --system-prompt-file\n");
+                return 2;
+            }
+            cfg.system_prompt = next("--system-prompt");
+            system_prompt_seen = true;
+        } else if (a == "--system-prompt-file") {
+            if (system_prompt_seen) {
+                std::fprintf(stderr, "bmoe-server: --system-prompt conflicts with --system-prompt-file\n");
+                return 2;
+            }
+            system_prompt_file = next("--system-prompt-file");
+            system_prompt_file_seen = true;
+        }
+        else if (a == "--reasoning-effort") {
+            cfg.reasoning_effort = next("--reasoning-effort");
+            if (cfg.reasoning_effort.empty()) {
+                std::fprintf(stderr, "bmoe-server: --reasoning-effort cannot be empty\n");
+                return 2;
+            }
+            reasoning_effort_seen = true;
+        } else if (a == "--chat-template") {
+            if (chat_template_file_seen) {
+                std::fprintf(stderr, "bmoe-server: --chat-template conflicts with --chat-template-file\n");
+                return 2;
+            }
+            cfg.chat_template = next("--chat-template");
+            chat_template_seen = true;
+        } else if (a == "--chat-template-file") {
+            if (chat_template_seen) {
+                std::fprintf(stderr, "bmoe-server: --chat-template conflicts with --chat-template-file\n");
+                return 2;
+            }
+            chat_template_file = next("--chat-template-file");
+            chat_template_file_seen = true;
+        } else if (a == "--cache-type-k" || a == "-ctk") {
+            if (!parse_kv_cache_type(next("--cache-type-k"), cfg.cache_type_k)) {
+                std::fprintf(stderr, "bmoe-server: invalid --cache-type-k\n");
+                return 2;
+            }
+        } else if (a == "--cache-type-v" || a == "-ctv") {
+            if (!parse_kv_cache_type(next("--cache-type-v"), cfg.cache_type_v)) {
+                std::fprintf(stderr, "bmoe-server: invalid --cache-type-v\n");
+                return 2;
+            }
+        } else if (a == "--flash-attn") {
+            if (!parse_flash_attention_mode(next("--flash-attn"), cfg.flash_attention)) {
+                std::fprintf(stderr, "bmoe-server: --flash-attn expects auto|on|off\n");
+                return 2;
+            }
+        }
         else if (a == "--progress")
             srv.progress = true;
         else if (a == "--session") {
@@ -1141,7 +1653,7 @@ int main(int argc, char ** argv) {
             // parity so one shared option vector can launch either frontend.
         } else if (a == "--no-think") {
             cfg.think = false;
-            srv.disable_think = true;
+            no_think_seen = true;
         } else if (a == "--csv")
             csv_path = next("--csv");
         else if (a == "--route-trace")
@@ -1233,11 +1745,37 @@ int main(int argc, char ** argv) {
         }
     }
 
+    std::string file_error;
+    if (system_prompt_file_seen && !read_text_file(system_prompt_file, cfg.system_prompt, file_error)) {
+        std::fprintf(stderr, "bmoe-server: %s\n", file_error.c_str());
+        return 2;
+    }
+    if (chat_template_file_seen && !read_text_file(chat_template_file, cfg.chat_template, file_error)) {
+        std::fprintf(stderr, "bmoe-server: %s\n", file_error.c_str());
+        return 2;
+    }
+    const std::string normalized_effort = normalize_reasoning_effort(cfg.reasoning_effort);
+    cfg.reasoning_effort = normalized_effort;
+    if (normalized_effort == "none") {
+        cfg.think = false;
+        cfg.reasoning_effort.clear();
+    } else if (no_think_seen && reasoning_effort_seen) {
+        std::fprintf(stderr, "bmoe-server: --no-think conflicts with --reasoning-effort %s\n",
+                     cfg.reasoning_effort.c_str());
+        return 2;
+    }
+    srv.default_think = cfg.think;
+    srv.default_reasoning_effort = cfg.reasoning_effort;
+    srv.default_system_prompt = cfg.system_prompt;
+
     // Env overrides
     const char * env_port = std::getenv("BMOE_SERVER_PORT");
     if (env_port && *env_port) srv.port = std::atoi(env_port);
     const char * env_host = std::getenv("BMOE_SERVER_HOST");
     if (env_host && *env_host) srv.host = env_host;
+    const char * env_mmproj = std::getenv("BMOE_MMPROJ");
+    if (!seen.count("-mm") && !seen.count("--mmproj") && env_mmproj && *env_mmproj)
+        cfg.multimodal.mmproj_path = env_mmproj;
 
     auto env_int = [](const char * key, int dflt) {
         const char * v = std::getenv(key);
@@ -1254,6 +1792,7 @@ int main(int argc, char ** argv) {
     if (!seen.count("--n-expert-used")) cfg.n_expert_used = env_int("BMOE_N_EXPERT_USED", 0);
     if (!seen.count("--predict-log")) cfg.moe.predict_log = env_int("BMOE_PREDICT_LOG", 0) != 0;
     if (!seen.count("--predict-prefetch")) cfg.moe.predict_prefetch = env_int("BMOE_PREDICT_PREFETCH", 0) != 0;
+    if (!seen.count("--max-request-mb")) srv.max_request_mb = env_int("BMOE_MAX_REQUEST_MB", 64);
 
     if (cfg.model_path.empty()) {
         print_usage(argv[0]);
@@ -1261,6 +1800,10 @@ int main(int argc, char ** argv) {
     }
     if (srv.port < 1 || srv.port > 65535) {
         std::fprintf(stderr, "bmoe-server: --port must be in 1..65535\n");
+        return 1;
+    }
+    if (srv.max_request_mb < 1 || srv.max_request_mb > 1024) {
+        std::fprintf(stderr, "bmoe-server: --max-request-mb must be in 1..1024\n");
         return 1;
     }
 
@@ -1275,7 +1818,9 @@ int main(int argc, char ** argv) {
     }
 
     // ── Open the session ──────────────────────────────────────────────
-    std::fprintf(stderr, "bmoe-server: loading model %s ...\n", cfg.model_path.c_str());
+    std::fprintf(stderr, "bmoe-server: loading model %s%s%s ...\n", cfg.model_path.c_str(),
+                 cfg.multimodal.enabled() ? " with mmproj " : "",
+                 cfg.multimodal.enabled() ? cfg.multimodal.mmproj_path.c_str() : "");
 
     std::unique_ptr<IMetricsSink> metrics;
     if (!csv_path.empty()) {

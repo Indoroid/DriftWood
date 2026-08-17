@@ -66,14 +66,21 @@ Cancel is distinct from a fatal streaming error, which is sticky and ends the se
 
 ## Fixed context
 
-`n_ctx` and `n_batch` are baked into the llama context at `open()`, before any prompt is known, so
-size them for the longest prompt + generation the session will serve. A request that would overflow
-`n_ctx` is rejected without tearing the session down.
+`n_ctx`, `n_batch`, and `n_ubatch` are baked into the llama context at `open()`, before any prompt is
+known. The frontends default to a 2048-token logical batch and a 512-token physical batch; both are
+capped to the configured context. Use `--batch-size` to set the prefill chunk and `--ubatch-size` to
+trade prefill throughput for resident compute-buffer memory. A request that would overflow `n_ctx`
+is rejected without tearing the session down.
 
 ## CLI and app
 
 `bmoe-cli --session` exposes this over a line protocol (requests on stdin, `BMOE_*` responses on
-stdout — see [telemetry.md](telemetry.md)). The Android example runs one such process per model:
+stdout — see [telemetry.md](telemetry.md)). A generate request may send either the legacy `prompt`
+or a complete `messages` transcript, plus `think`, `reasoning_effort`, and JSON-valued
+`chat_template_kwargs`; these request controls do not reopen the session. Library callers and
+`bmoe-server` may additionally set a non-negative `reasoning_budget_tokens` value to limit only
+the template's reasoning span (`0` closes it at once), not the final-answer `n_predict` allowance.
+The Android example runs one such process per model:
 the first prompt loads the model, later prompts reuse the warm process, and the session is freed on
 an explicit **Unload** or after an idle timeout. Changing the model or any streaming setting
 reopens the session; changing only the prompt, `n_predict`, or the thinking toggle does not.

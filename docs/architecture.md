@@ -10,7 +10,7 @@ a single ~25-line hook on a fork branch with an explicit sunset (see below and
 ## Layers
 
 ```
-cli/            bmoe-cli — parses flags, the only place env vars are read
+cli/            bmoe-cli and bmoe-server — parse flags; the only place env vars are read
 core/
   include/bmoe/ ports (interfaces) + config, pure policy, no llama.cpp dependency
     config.h        RunConfig + validate()
@@ -28,6 +28,7 @@ core/
                 runtime — the one-shot run() wrapper over a Session
                 chat_parse — reasoning-parser wiring (llama.cpp `common`, see seam.md)
                 thinking_control — how "thinking off" is honoured, probed per model
+    multimodal/ mtmd projector adapter + file-backed media input
     metrics/    csv_metrics_sink, route_trace_sink, decode_trace_sink
 third_party/
   llama.cpp     upstream submodule; public-API consumer, plus one optional overlap hook
@@ -57,9 +58,9 @@ already public in llama.cpp:
 3. **The file layout.** `gguf_get_tensor_offset` (public) gives each tensor's byte offset
    so we can `pread` individual expert slices.
 
-Loading with `use_mmap=true, use_extra_bufts=false` keeps the weights in their native
-gguf layout (a repacked buffer would break the rebind). That is a public model
-parameter.
+Loading with `load_mode=LLAMA_LOAD_MODE_MMAP, use_extra_bufts=false` keeps the weights in
+their native gguf layout (a repacked buffer would break the rebind). That is a public
+model parameter.
 
 Because none of this touches llama.cpp internals, the serial streaming path runs against
 the unmodified upstream repository. Contrast with approaches that patch the model files:
@@ -91,6 +92,11 @@ The composition root is `Session` (core/src/engine/session.cpp):
 
 `run()` (core/src/engine/runtime.cpp) is a thin one-shot wrapper — open, one generate, close —
 so the gates and the interactive session share the same code path.
+
+When a projector is configured, `Session` owns it beside the text model. mtmd preprocesses
+ordered image/audio bytes and evaluates their embeddings during prefill; ordinary text decode,
+expert routing, cache policy, and token generation remain on the same text-model path. The public
+session API carries byte buffers and content-part indices, not llama.cpp mtmd types.
 
 Greedy sampling makes the output a deterministic function of the graph — the property the
 [byte-identity gates](../tests/moe_gates.cpp) assert. That holds with the lossy knobs off. Under

@@ -114,10 +114,10 @@ Reading these:
 
 gpt-oss-120b is 5.2× device RAM. Streaming still bounds the **expert** memory correctly —
 experts are read via O_DIRECT straight into the bounded cache (`resident ≈ 2988 MiB`,
-budget 3000), bypassing the page cache. But the model is loaded `use_mmap=true`, so the
-**non-expert** resident set lives as reclaimable, file-backed pages. With free RAM near
-zero, the kernel evicts those clean pages under pressure and they must be **re-faulted from
-flash during the FFN compute** — a synchronous major fault that the `compute_ms` timer
+budget 3000), bypassing the page cache. But the model is loaded with
+`LLAMA_LOAD_MODE_MMAP`, so the **non-expert** resident set lives as reclaimable,
+file-backed pages. With free RAM near zero, the kernel evicts those clean pages under pressure and
+they must be **re-faulted from flash during the FFN compute** — a synchronous major fault that the `compute_ms` timer
 absorbs. Overlap cannot hide this: it hides *flash I/O*, and this stall is inside *compute*.
 
 **gpt-oss-120b — k=2 (io4)** — 24-token probe:

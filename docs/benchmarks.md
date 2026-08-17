@@ -370,4 +370,5 @@ Model files (both Q4_K_M GGUF, staged on the device at `/sdcard/Download/`):
 | Gemma | `/sdcard/Download/google_gemma-4-26B-A4B-it-Q4_K_M.gguf` | 17.0 GB |
 
 Sizes are the on-disk GGUF byte counts; both are stock Q4_K_M conversions, unmodified by the
-engine (it loads `use_mmap=true`, rebinds expert tensors to the native gguf layout, no repack).
+engine (it loads with `LLAMA_LOAD_MODE_MMAP`, rebinds expert tensors to the native gguf layout,
+no repack).

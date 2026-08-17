@@ -52,6 +52,7 @@ recorded in the demo app on a 12 GB phone, real time, not sped up.</em></p>
 - [Supported models](#supported-models)
 - [Benchmarks](#benchmarks)
 - [Quickstart](#quickstart)
+- [Sessions and telemetry](#sessions-and-telemetry)
 - [How it works](#how-it-works)
 - [Documentation](#documentation)
 - [Prior art](#prior-art)
@@ -151,10 +152,25 @@ task before relying on it.
 
 ### Sessions and telemetry
 
-The model stays loaded across chat turns, and every run can account for its own time: `--progress`
-breaks each token into flash I/O, cache management and compute, next to the cache hit rate and
-bytes read, and `--csv` adds the memory picture those numbers must be read against. The Android
-app renders the same feed live while you chat. More under [Telemetry](#telemetry).
+The model stays loaded across chat turns, and the expert cache stays warm between requests. Use
+`--session` for a persistent stdin/stdout JSON-lines process:
+
+```bash
+build/cli/bmoe-cli -m Qwen3-30B-A3B-Q4_K_M.gguf --moe-stream --session \
+  --cache-mb auto --cache-ceil-mb 4000 --io-threads 4 --chatml
+```
+
+Send independent prompts with `clear_kv: true`, or continue a model-owned chat with
+`clear_kv: false`. Requests may also provide a complete `messages` transcript, `think`,
+`reasoning_effort`, and JSON `chat_template_kwargs`; cancellation keeps the loaded model and cache
+usable. The session reports separate reasoning and answer text in its `BMOE_*` responses, and
+`BMOE_DONE` reports prefill, context, cache, and generation totals. See
+[session.md](docs/session.md) for the protocol and KV-prefix reuse details.
+
+Every run can account for its own time: `--progress` breaks each token into flash I/O, cache
+management and compute, next to the cache hit rate and bytes read, and `--csv` adds the memory
+picture those numbers must be read against. The Android app renders the same feed live while you
+chat. More under [Telemetry](#telemetry).
 
 ### Android demo app
 
@@ -173,6 +189,7 @@ Defaults are the measured winning recipe for a model near RAM.
 | `gpt-oss` | OpenAI gpt-oss-20b / 120b | Purely routed; MXFP4 weights stream unchanged |
 | `lfm2moe` | Liquid AI LFM2 / LFM2.5 MoE (e.g. 8B-A1B) | Hybrid conv/attention stack with leading dense blocks; those stay resident |
 | `deepseek4` | DeepSeek V4 Flash (284B-A13B), validated on the 0731 release | V3.2-style routing (256 experts + shared); compressed attention is dense-side; ships multi-shard |
+| `bailingmoe3` | Ling 3.0 (e.g. Ling-3.0-flash, 127B-A5B) | 512 routed experts + shared, biased top-k; hybrid KDA/MLA attention is dense-side |
 
 Adding an architecture is one row in the registry; expert counts and layouts are discovered from
 the model file at runtime, so nothing about a specific model is hardcoded in the streaming path.
@@ -369,7 +386,8 @@ expert cache warm across requests:
 
 ```bash
 build/cli/bmoe-server -m Qwen3-30B-A3B-Q4_K_M.gguf --moe-stream \
-  --cache-mb auto --io-threads 4 -t 4 --port 8080 --host 127.0.0.1 --no-think
+  --cache-mb auto --io-threads 4 --batch-size 2048 --ubatch-size 512 \
+  -t 4 --port 8080 --host 127.0.0.1 --no-think
 ```
 
 It exposes an OpenAI-compatible REST API:
@@ -383,13 +401,20 @@ It exposes an OpenAI-compatible REST API:
 Both POST endpoints accept `stream: true` for server-sent events (SSE) token streaming, using
 `Transfer-Encoding: chunked` for compatibility with OpenAI-compatible SDKs (OpenAI/JS,
 OpenAI/Python). The server also accepts `max_completion_tokens` in addition to `max_tokens`, and
-handles `content` as either a plain string or an array of `{"type":"text","text":"..."}` objects.
+handles `content` as either a plain string or a content-part array. With `--mmproj`, chat content
+may include OpenAI-style `image_url` data URLs and `input_audio` base64 parts; text/media ordering is
+preserved when mtmd markers are rendered. Remote image URLs are intentionally not fetched by the
+server, so send images as `data:<mime>;base64,...`.
+Responses echo the requested `model` (or use the loaded GGUF filename when omitted) and include the
+standard OpenAI completion fields, including `logprobs`, `system_fingerprint`, and token `usage`.
+With `stream_options: {"include_usage": true}`, normal SSE chunks contain `"usage": null` and a
+final `choices: []` chunk reports token totals before `[DONE]`.
 Chat requests preserve the complete supplied transcript, including system and earlier assistant
 messages. OpenAI function tools, assistant `tool_calls`, tool-result messages, `tool_choice`, and
 `parallel_tool_calls` are passed through the model's own Jinja template; parsed calls are returned in
-the standard response shape for agent clients. Tool-bearing SSE requests are buffered until the
-parser can distinguish a final answer from a tool call, then emitted as one valid delta followed by
-`[DONE]`. Other SSE requests stream token-by-token.
+the standard response shape for agent clients. SSE chat requests stream parser-confirmed answer and
+reasoning deltas while tool-call markup remains withheld; completed tool calls are emitted in the
+standard response shape before `[DONE]`.
 
 Request-level `temperature` and `top_p` override server defaults. Every applicable `bmoe-cli` model
 and diagnostic option is accepted by the server, including CSV/route/compute/I/O traces,
@@ -397,8 +422,53 @@ and diagnostic option is accepted by the server, including CSV/route/compute/I/O
 `--session` is accepted as a no-op because the server is always persistent. `--progress` preserves
 the CLI's stdout telemetry alongside HTTP/SSE responses; request bodies replace `--prompt`. Chat
 requests always use the model template. Raw `/v1/completions` stay raw unless the
-server was started with `--chatml`, matching the CLI flag exactly. `--no-think` disables model
-thinking where the model template supports it.
+server was started with `--chatml`, matching the CLI flag exactly. `--no-think` sets the server's
+default; each request may override it with `think` or `reasoning_effort`.
+
+Multimodal server example:
+
+```bash
+build/cli/bmoe-server -m model.gguf --mmproj mmproj-model-f16.gguf --moe-stream \
+  --cache-mb auto --port 8080
+```
+
+```json
+{
+  "model": "model.gguf",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image: "},
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/png;base64,<BASE64>"}
+        }
+      ]
+    }
+  ],
+  "max_tokens": 128
+}
+```
+
+Audio uses `{"type":"input_audio","input_audio":{"data":"<BASE64>","format":"wav"}}`.
+The default request-body cap is 64 MiB and can be changed with `--max-request-mb`. Multimodal v1
+still starts each request from a fresh KV state and rejects MTP/n-gram speculation for media turns.
+
+Runtime controls split by lifetime. Request-hot controls are `think`, `reasoning_effort`,
+`reasoning_budget_tokens`, complete chat messages (including system prompts), `chat_template_kwargs`,
+sampling, and `n_predict`. Session controls are the custom chat template and KV allocation settings:
+
+~~~text
+--chat-template-file template.jinja
+--cache-type-k q8_0 --cache-type-v q8_0 --flash-attn auto
+~~~
+
+Quantized V cache requires Flash Attention. Reasoning effort is template/model dependent: passing
+`high` requests that value but does not guarantee a distinct model behavior. A chat request may set
+`"reasoning_budget_tokens": N` (`"thinking_budget_tokens"` is an alias): `0` ends the template's
+reasoning span immediately, a positive value caps its generated tokens, and `-1` or omission leaves
+it unlimited. The budget never reduces `max_completion_tokens` for the final answer.
 
 Build-tree binaries use an origin-relative runtime library path, so an extracted or moved build can
 run `build/cli/bmoe-server` directly without setting `LD_LIBRARY_PATH`.
@@ -414,6 +484,13 @@ python3 scripts/test-lfm25-server.py \
   --out-dir build/lfm25-live -- \
   --moe-stream --cache-mb 0 --no-odirect --progress
 ```
+
+The server and session frontends share the same model, sampling, streaming, cache, speculation,
+prediction, and diagnostic controls. Session-scoped context settings include custom Jinja chat
+templates, `--cache-type-k`, `--cache-type-v`, and `--flash-attn`; request-scoped controls include
+the full chat transcript, thinking/effort, template kwargs, sampling, and token limits. Quantized
+V cache requires Flash Attention. See [session.md](docs/session.md) and
+[telemetry.md](docs/telemetry.md) for the persistent-process contracts.
 
 Platform status: Linux is exercised by CI (build + gates) and Windows is where the
 [desktop numbers](#desktop) were measured. On Windows, build with CMake directly (Visual Studio
@@ -437,7 +514,7 @@ layer picks its experts for the current token, the engine fetches exactly those 
 just in time for the matmul, optionally caching the hottest ones and overlapping reads with
 compute. No llama.cpp sources are modified. The one exception is the optional `--overlap` flag,
 which needs a per-expert wait point inside the CPU MoE kernel that no public API exposes: it
-carries a single ~25-line hook, as one commit on the fork branch `bmoe/expert-ready-hook`. The
+carries a single small hook, as one commit on the fork branch `bmoe/expert-ready-hook`. The
 hook is zero-cost when unregistered, everything else builds against stock upstream, and it is
 dropped the moment upstream ships an equivalent. Design and the exact API contract:
 [docs/architecture.md](docs/architecture.md), [docs/seam.md](docs/seam.md).

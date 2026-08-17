@@ -19,6 +19,7 @@
 #include "bmoe/runtime.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,19 +30,23 @@ class IRouteTraceSink;
 class IComputeTraceSink;
 class IIoTraceSink;
 
-// Everything fixed for the model's lifetime — set once at open(). n_ctx and n_batch are
-// baked into the llama context at creation and cannot change per prompt, so size them for
-// the longest prompt+generation the session will serve.
+// Everything fixed for the model's lifetime — set once at open(). n_ctx, n_batch and n_ubatch are
+// baked into the llama context at creation and cannot change per prompt, so size them for the
+// longest prompt+generation the session will serve.
 struct SessionConfig {
     std::string model_path;
     int n_threads = 4;
     int n_ctx = 2048;
-    int n_batch = 512; // prefill chunk capacity; longer prompts are prefilled in n_batch slices
+    int n_batch = 2048; // prefill chunk capacity; capped at n_ctx in open()
     // Widest graph actually computed at once. 0 = follow n_batch. Sizing this down trades prefill
     // throughput for resident compute buffers, which on this engine compete with the expert cache.
     // See RunConfig::n_ubatch.
-    int n_ubatch = 0;
+    int n_ubatch = 512;
     bool chatml = false;
+    std::string chat_template;
+    KvCacheType cache_type_k = KvCacheType::F16;
+    KvCacheType cache_type_v = KvCacheType::F16;
+    FlashAttentionMode flash_attention = FlashAttentionMode::Auto;
     // Active-expert (top-k) override applied at load via a kv_override on the arch-prefixed
     // expert_used_count key. 0 = use the model's own count. See RunConfig::n_expert_used.
     int n_expert_used = 0;
@@ -54,12 +59,13 @@ struct SessionConfig {
     // open() builds the wider verify batch, and — for the MTP source only — the draft context.
     // See RunConfig::spec.
     SpecConfig spec;
+    MultimodalConfig multimodal;
 };
 
 // The RunConfig → SessionConfig mapping, in one place. Both entry points that open a session from a
 // RunConfig — run() and the CLI's interactive loop — need it, and they used to spell it out field by
 // field. Two copies of a mapping is one copy too many: adding a field to RunConfig must not depend on
-// remembering to touch both. n_batch = n_ctx so any prompt that fits the context prefills in one batch.
+// remembering to touch both. Session::open() caps the configured batch sizes to the context.
 SessionConfig session_config_from(const RunConfig & cfg);
 
 // How a GenerateRequest::think=false request can be honoured on THIS model. Decided once at
@@ -82,9 +88,27 @@ const char * think_control_name(ThinkControl c);
 
 // Per-prompt request. clear_kv=true (the default) makes each prompt independent while the
 // expert cache stays warm; clear_kv=false continues the KV cache for multi-turn chat.
+enum class ChatContentKind {
+    Text,
+    Media,
+};
+
+struct ChatContentPart {
+    ChatContentKind kind = ChatContentKind::Text;
+    std::string text;
+    // Media parts reference GenerateRequest::media by index. Media references must appear in
+    // monotonically increasing order across the transcript so mtmd's marker order matches its
+    // bitmap/audio array exactly.
+    size_t media_index = 0;
+};
+
 struct ChatMessage {
     std::string role;
     std::string content;
+    // Optional structured content. When non-empty, Session renders these parts instead of `content`,
+    // replacing Media entries with the loaded projector's marker. This preserves OpenAI-style
+    // interleaving such as text -> image -> text without leaking mtmd types through the public API.
+    std::vector<ChatContentPart> content_parts;
     std::string reasoning_content;
     std::string tool_name;
     std::string tool_call_id;
@@ -103,12 +127,20 @@ enum class ChatToolChoice {
     None,
 };
 
+struct MediaInput {
+    std::vector<std::uint8_t> bytes;
+    std::string name;
+};
+
 struct GenerateRequest {
     std::string prompt;
     // Optional complete chat transcript. When non-empty, the model chat template receives these
     // messages verbatim instead of wrapping prompt as one user turn. This keeps HTTP requests
     // stateless while preserving system and assistant messages supplied by OpenAI-style clients.
     std::vector<ChatMessage> messages;
+    // Raw image/audio file bytes. Prompt must contain one projector marker per item; when callers
+    // supply ordinary prompt/messages DriftWood inserts those markers into the user content.
+    std::vector<MediaInput> media;
     std::vector<ChatTool> tools;
     ChatToolChoice tool_choice = ChatToolChoice::Auto;
     bool parallel_tool_calls = false;
@@ -118,6 +150,13 @@ struct GenerateRequest {
     bool chatml = true;
     int n_predict = 32;
     bool think = true;
+    std::string reasoning_effort;
+    // -1 leaves reasoning unlimited. A non-negative value limits tokens in the template's
+    // reasoning span without consuming the answer's n_predict allowance.
+    int reasoning_budget_tokens = -1;
+    // Values must be serialized JSON literals (for example, "true" or "\"fast\"") because
+    // llama.cpp parses each value before exposing it to the Jinja context.
+    std::map<std::string, std::string> chat_template_kwargs;
     bool clear_kv = true;
     // HTTP callers can override sampling per request without reopening the model. Ordinary callers
     // leave this false and retain the SessionConfig sampling chain.

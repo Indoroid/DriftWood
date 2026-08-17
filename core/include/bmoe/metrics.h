@@ -249,9 +249,14 @@ struct RunInfo {
     int n_expert_used = 0; // effective top-k, after any override
     int n_threads = 0;
     int n_ctx = 0;
-    int n_ubatch = 0;    // widest graph computed at once; 0 = follow n_batch. Sets the compute-buffer
-                         // reservation, so it moves the very memory columns these rows record.
+    int n_batch = 0;  // logical prefill chunk capacity
+    int n_ubatch = 0; // widest graph computed at once; sets the compute-buffer reservation, so it
+                      // moves the very memory columns these rows record.
     bool chatml = false; // a chat-templated prompt is not the prompt that was typed
+    std::string cache_type_k = "f16";
+    std::string cache_type_v = "f16";
+    std::string flash_attention = "auto";
+    bool custom_chat_template = false;
     // Deliberately absent: `think`. It is a property of a REQUEST, not of the session, so a session
     // preamble stating one value would be wrong for every turn that asked for the other. The `turn`
     // column is where per-turn facts belong.

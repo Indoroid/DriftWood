@@ -1,8 +1,21 @@
 # The seam: how we hook llama.cpp without forking it
 
-Everything that connects BigMoeOnEdge to llama.cpp goes through two public mechanisms.
-This file documents the exact contract so it can be re-verified when the submodule is
-updated.
+Expert streaming connects BigMoeOnEdge to llama.cpp through two public mechanisms.
+Multimodal input uses the separate mtmd boundary documented below. This file records both
+contracts so they can be re-verified when the submodule is updated.
+
+## Multimodal projector boundary
+
+Multimodal input uses llama.cpp's separately built `mtmd` library. The dependency is private to
+`core/src/multimodal/mtmd_runtime.cpp`: public bmoe headers expose projector configuration,
+media byte buffers, and ordered content parts without including mtmd headers. The adapter creates
+the projector context, derives the model-owned media marker, preprocesses image/audio bytes, and
+evaluates the resulting chunks against the existing text-model context.
+
+This boundary does not alter expert tensor layout or routing. After multimodal prefill, generation
+uses the same public llama model/context APIs and the same expert-stream callback described below.
+Because mtmd is built from the pinned submodule, a llama.cpp bump must recompile this adapter and
+re-run the host build. No llama.cpp source file is patched for multimodal support.
 
 ## 1. The eval-callback
 
@@ -46,6 +59,9 @@ weights, or its control flow. It stays inside the same callback contract; nothin
 `gguf_get_tensor_offset` (all public) give each tensor's absolute byte offset in the file,
 without loading any tensor data. We match these to the captured tensors by name.
 
+Model loading also stays on the public API: `llama_model_params.load_mode` is fixed to
+`LLAMA_LOAD_MODE_MMAP`, and `use_extra_bufts=false` prevents repacking before tensor rebinding.
+
 ## 3. The expert-ready hook (fork extension)
 
 Sections 1 and 2 are enough for the *serial* streamer: block on the expert reads, then let
@@ -53,8 +69,8 @@ the layer compute. Overlapping the two — reading a token's experts while the s
 expert matmuls are running — needs a wait point that no public API exposes. That is the one
 place where BigMoeOnEdge carries a llama.cpp extension.
 
-**What it is.** A single optional hook, ~25 lines, living on the fork branch
-`bmoe/expert-ready-hook` of `Helldez/llama.cpp` as a single commit on top of the upstream
+**What it is.** A single optional hook, 16 added lines, living on the fork branch
+`bmoe/expert-ready-hook` of `Indoroid/llama.cpp` as a single commit on top of the upstream
 pin. It adds nothing to the model files and changes no data layout; it is a callback the
 CPU MoE kernel invokes.
 
@@ -97,8 +113,10 @@ library for two things: rendering the model's own chat template and parsing reas
 (with `--mtp`) driving speculative decoding.
 `common_chat_templates_init` / `common_chat_templates_apply` run the real Jinja template the
 gguf ships (so Gemma's channel format, Qwen ChatML, etc. all format correctly, driven by the
-model rather than hardcoded), and `common_chat_parse` extracts a reasoning model's thinking so
-it can be reported apart from the answer. The parser-params wiring lives in its own translation
+model rather than hardcoded), `common_chat_parse` extracts a reasoning model's thinking, and
+`common_sampler` applies a request-local reasoning-token budget using those template-derived
+delimiters, so neither markers nor the forced closing sequence are hardcoded and thinking can be
+reported apart from the answer. The parser-params wiring lives in its own translation
 unit, `chat_parse.cpp` — the PEG parser arena has to be loaded explicitly or `common_chat_parse`
 throws on the first token, which is how issue #49 stayed invisible; keeping it separate makes
 that seam unit-testable without a model.
@@ -170,13 +188,12 @@ Because the submodule pins the `bmoe/expert-ready-hook` fork branch (section 3),
 rebases that 1-commit branch onto the new upstream tag, re-pushes it, and re-pins:
 
 ```bash
-# in a Helldez/llama.cpp checkout: rebase the single hook commit onto the new tag
+# in an Indoroid/llama.cpp checkout: rebase the single hook commit onto the new tag
 git fetch upstream && git checkout bmoe/expert-ready-hook
 git rebase <newer-upstream-tag> && git push --force-with-lease origin bmoe/expert-ready-hook
 
-# in this repo: move the submodule to the rebased commit, rebuild, run the gates
-cd third_party/llama.cpp && git fetch origin && git checkout <rebased-commit>
-cd ../.. && git add third_party/llama.cpp && scripts/build-host.sh
+# in this repo: pin the latest bmoe/expert-ready-hook commit, rebuild, run the gates
+scripts/sync-llama.sh && scripts/build-host.sh
 cd build && ctest --output-on-failure     # gates must stay green
 ```
 
@@ -193,7 +210,5 @@ output. Each supported architecture adds one more gate to keep green across a bu
 If a future release moves the two hooks (a stable expert-residency API, say) upstream,
 this seam shrinks further or disappears — `core/` does not change.
 
-Pinned submodule at the time of writing: `Helldez/llama.cpp` branch
-`bmoe/expert-ready-hook`, commit `5236140` — the single expert-ready-hook commit (section 3)
-on top of upstream `ggml-org/llama.cpp` master `22b69b6` (see `.gitmodules` /
-`git submodule status` for the current pin).
+The submodule tracks only the `Indoroid/llama.cpp` branch `bmoe/expert-ready-hook`; see
+`.gitmodules` and `git submodule status` for the current pin.

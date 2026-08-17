@@ -40,7 +40,7 @@ Android CLI: `pwsh scripts/build-android.ps1` (needs the NDK), then build the AP
    public gguf/model APIs. If a change seems to need a llama.cpp edit, stop and discuss —
    the fallback is a *separate* 1-commit fork branch on `Helldez/llama.cpp`, never an
    in-tree diff, and only after agreement. Upgrading llama.cpp must stay a submodule bump.
-2. **Repack stays off.** The engine loads with `use_mmap=true, use_extra_bufts=false`.
+2. **Repack stays off.** The engine loads with `load_mode=LLAMA_LOAD_MODE_MMAP, use_extra_bufts=false`.
    The streamer rebinds `tensor->data` to the native gguf layout; repacking breaks it.
    This is load-bearing, not a tunable.
 3. **No env vars in the library.** `core/` never calls `getenv`. Config flows through

@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace bmoe {
 
@@ -35,6 +36,29 @@ enum class DenseWeightsMode {
                // Android-only (pio::pinned_alloc); init fails where unsupported rather than falling
                // back, so an A/B against Anonymous can never silently compare a mode to itself.
 };
+
+enum class KvCacheType {
+    F32,
+    F16,
+    BF16,
+    Q8_0,
+    Q5_0,
+    Q5_1,
+    Q4_0,
+    Q4_1,
+    IQ4_NL,
+};
+
+enum class FlashAttentionMode {
+    Auto,
+    Enabled,
+    Disabled,
+};
+
+const char * kv_cache_type_name(KvCacheType type);
+const char * flash_attention_mode_name(FlashAttentionMode mode);
+bool parse_kv_cache_type(const std::string & value, KvCacheType & out);
+bool parse_flash_attention_mode(const std::string & value, FlashAttentionMode & out);
 
 // MoE expert-selective streaming knobs.
 struct MoeStreamConfig {
@@ -68,7 +92,7 @@ struct MoeStreamConfig {
     // Overlap async expert reads with FFN compute instead of blocking on them: load_layer()
     // publishes the reads and returns immediately, and the CPU mul_mat_id kernel blocks per
     // expert (via the fork's expert-ready hook) only if that expert's slice is not yet in.
-    // Requires the Helldez/llama.cpp fork submodule (the hook); run() fails fast otherwise.
+    // Requires the Indoroid/llama.cpp fork submodule (the hook); run() fails fast otherwise.
     bool overlap = false;
 
     // Two-wave batch publish (#118). A layer's read batch normally becomes visible to the I/O
@@ -290,18 +314,37 @@ struct SpecConfig {
     bool is_ngram() const { return source == DraftSource::ngram; }
 };
 
+// Multimodal projector policy. The text model remains under DriftWood's normal placement and
+// MoE streaming rules; this controls only llama.cpp's mtmd projector.
+struct MultimodalConfig {
+    std::string mmproj_path;
+    bool offload = true;
+    bool warmup = true;
+    int image_min_tokens = -1;
+    int image_max_tokens = -1;
+    int batch_max_tokens = 1024;
+
+    bool enabled() const { return !mmproj_path.empty(); }
+};
+
 // A full run: model, prompt, decoding, streaming, telemetry.
 struct RunConfig {
     std::string model_path;
     std::string prompt = "The capital of Japan is";
+    MultimodalConfig multimodal;
+    // One-shot CLI/runtime convenience. Session itself receives media as bytes.
+    std::vector<std::string> media_paths;
     int n_predict = 128;
     int n_threads = 4;
     int n_ctx = 2048;
 
-    // Largest batch computed in one graph, i.e. the prefill chunk size. 0 (the default) means
-    // "follow n_ctx", which prefills any fitting prompt in a single pass.
+    // Logical prefill chunk capacity. Capped at n_ctx when the session opens.
+    int n_batch = 2048;
+
+    // Largest batch computed in one graph. Capped at n_batch when the session opens; 0 retains the
+    // old "follow n_batch" behaviour for existing callers.
     //
-    // It is worth exposing because it does not only cost time, it costs RESIDENT MEMORY: the
+    // This is exposed because it does not only cost time, it costs RESIDENT MEMORY: the
     // scheduler reserves compute buffers for the worst-case graph, which is a full-width prefill,
     // and on this engine every MiB reserved is a MiB the expert cache and the dense weights do not
     // get. Measured at n_ctx 2048: 320 MiB of compute buffer, falling to 80 MiB at 512 — the
@@ -311,9 +354,15 @@ struct RunConfig {
     //
     // Decode is unaffected: a decode graph is one token wide whatever this says. The cost is
     // prefill throughput, which processes a long prompt in more, smaller passes.
-    int n_ubatch = 0;
+    int n_ubatch = 512;
     bool chatml = false;   // wrap the prompt in the model family's chat turn (arch-aware)
     bool progress = false; // emit machine telemetry (one JSON line per token)
+
+    std::string system_prompt;
+    std::string chat_template;
+    KvCacheType cache_type_k = KvCacheType::F16;
+    KvCacheType cache_type_v = KvCacheType::F16;
+    FlashAttentionMode flash_attention = FlashAttentionMode::Auto;
 
     // Render the chat template with reasoning enabled. Passed to the template as the
     // `enable_thinking` kwarg, so a reasoning model (Qwen3, thinking Gemma, …) only emits
@@ -321,6 +370,7 @@ struct RunConfig {
     // relying on the display-time parser, which cannot strip a format it does not know.
     // Only meaningful with chatml; the raw-prompt path ignores it.
     bool think = true;
+    std::string reasoning_effort;
 
     // Override the number of active MoE experts per token (top-k routing). 0 = use the
     // model's own <arch>.expert_used_count from the gguf. A lower value cuts per-token

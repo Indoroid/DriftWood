@@ -1,8 +1,73 @@
 #include "bmoe/config.h"
 
+#include <algorithm>
+#include <cctype>
 #include <utility>
 
 namespace bmoe {
+
+namespace {
+
+std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+} // namespace
+
+const char * kv_cache_type_name(KvCacheType type) {
+    switch (type) {
+    case KvCacheType::F32: return "f32";
+    case KvCacheType::F16: return "f16";
+    case KvCacheType::BF16: return "bf16";
+    case KvCacheType::Q8_0: return "q8_0";
+    case KvCacheType::Q5_0: return "q5_0";
+    case KvCacheType::Q5_1: return "q5_1";
+    case KvCacheType::Q4_0: return "q4_0";
+    case KvCacheType::Q4_1: return "q4_1";
+    case KvCacheType::IQ4_NL: return "iq4_nl";
+    }
+    return "f16";
+}
+
+const char * flash_attention_mode_name(FlashAttentionMode mode) {
+    switch (mode) {
+    case FlashAttentionMode::Auto: return "auto";
+    case FlashAttentionMode::Enabled: return "on";
+    case FlashAttentionMode::Disabled: return "off";
+    }
+    return "auto";
+}
+
+bool parse_kv_cache_type(const std::string & value, KvCacheType & out) {
+    const std::string v = lower(value);
+    KvCacheType parsed;
+    if (v == "f32") parsed = KvCacheType::F32;
+    else if (v == "f16") parsed = KvCacheType::F16;
+    else if (v == "bf16") parsed = KvCacheType::BF16;
+    else if (v == "q8_0") parsed = KvCacheType::Q8_0;
+    else if (v == "q5_0") parsed = KvCacheType::Q5_0;
+    else if (v == "q5_1") parsed = KvCacheType::Q5_1;
+    else if (v == "q4_0") parsed = KvCacheType::Q4_0;
+    else if (v == "q4_1") parsed = KvCacheType::Q4_1;
+    else if (v == "iq4_nl") parsed = KvCacheType::IQ4_NL;
+    else return false;
+    out = parsed;
+    return true;
+}
+
+bool parse_flash_attention_mode(const std::string & value, FlashAttentionMode & out) {
+    const std::string v = lower(value);
+    FlashAttentionMode parsed;
+    if (v == "auto") parsed = FlashAttentionMode::Auto;
+    else if (v == "on") parsed = FlashAttentionMode::Enabled;
+    else if (v == "off") parsed = FlashAttentionMode::Disabled;
+    else return false;
+    out = parsed;
+    return true;
+}
 
 ValidationResult validate(const RunConfig & cfg) {
     ValidationResult r;
@@ -24,20 +89,38 @@ ValidationResult validate(const RunConfig & cfg) {
     if (cfg.n_ctx <= 0) {
         return fail("n_ctx must be positive");
     }
-    // 0 means "as wide as the context"; anything larger than the context would be reserved for a
-    // batch that can never arrive, which is the opposite of what this knob is for.
-    if (cfg.n_ubatch < 0) {
-        return fail("n_ubatch must be >= 0 (0 = as wide as the context)");
+    if (cfg.n_batch <= 0) {
+        return fail("n_batch must be positive");
     }
-    if (cfg.n_ubatch > cfg.n_ctx) {
-        return fail("n_ubatch=" + std::to_string(cfg.n_ubatch) + " exceeds n_ctx=" + std::to_string(cfg.n_ctx) +
-                    ": the compute buffers would be reserved for a batch that cannot occur.");
+    if (cfg.n_ubatch < 0) {
+        return fail("n_ubatch must be >= 0 (0 = as wide as n_batch)");
     }
     // Lower bound only: 0 means "use the model default". The upper bound (<= the model's
     // real expert count) needs the loaded gguf, so it is deferred to run() where the model
     // is available — same rationale as the streaming checks that stay out of this pure path.
     if (cfg.n_expert_used < 0) {
         return fail("n_expert_used must be >= 0 (0 = model default)");
+    }
+    if (!cfg.media_paths.empty() && !cfg.multimodal.enabled()) {
+        return fail("media input requires --mmproj");
+    }
+    if (cfg.multimodal.batch_max_tokens <= 0) {
+        return fail("multimodal.batch_max_tokens must be positive");
+    }
+    if (cfg.multimodal.image_min_tokens < -1 || cfg.multimodal.image_max_tokens < -1) {
+        return fail("multimodal image token limits must be -1 (metadata default) or >= 0");
+    }
+    if (cfg.multimodal.image_min_tokens >= 0 && cfg.multimodal.image_max_tokens >= 0 &&
+        cfg.multimodal.image_min_tokens > cfg.multimodal.image_max_tokens) {
+        return fail("multimodal.image_min_tokens must not exceed image_max_tokens");
+    }
+    if (!cfg.think && !cfg.reasoning_effort.empty() && lower(cfg.reasoning_effort) != "none") {
+        return fail("reasoning_effort requires thinking to be enabled (use 'none' to disable reasoning)");
+    }
+    if (cfg.reasoning_effort.size() > 64) return fail("reasoning_effort must be at most 64 bytes");
+    if (cfg.cache_type_v != KvCacheType::F32 && cfg.cache_type_v != KvCacheType::F16 &&
+        cfg.cache_type_v != KvCacheType::BF16 && cfg.flash_attention == FlashAttentionMode::Disabled) {
+        return fail("quantized V cache requires Flash Attention; use auto/on or choose an unquantized V cache type");
     }
 
     // Sampling ranges are enforced only when sampling is actually on (temp > 0). With temp <= 0
@@ -93,13 +176,15 @@ ValidationResult validate(const RunConfig & cfg) {
     // TOGETHER. A narrower graph splits it back into single-token passes, which spends the draft
     // and keeps none of the amortisation — the feature would cost time and buy nothing. Rejected
     // rather than silently degraded: nothing in the output would show that it happened. 0 means
-    // "as wide as the context" and is always wide enough.
-    if (cfg.spec.enabled() && cfg.n_ubatch > 0 && cfg.n_ubatch < cfg.spec.draft_max + 1) {
-        return fail("n_ubatch=" + std::to_string(cfg.n_ubatch) + " is narrower than the verify batch (" +
+    // "as wide as n_batch".
+    const int effective_batch = std::min(cfg.n_batch, cfg.n_ctx);
+    const int effective_ubatch = cfg.n_ubatch > 0 ? std::min(cfg.n_ubatch, effective_batch) : effective_batch;
+    if (cfg.spec.enabled() && effective_ubatch < cfg.spec.draft_max + 1) {
+        return fail("effective n_ubatch=" + std::to_string(effective_ubatch) + " is narrower than the verify batch (" +
                     std::to_string(cfg.spec.draft_max + 1) +
                     " positions): the graph would be split back into single-token passes and speculation "
-                    "would draft at a cost with nothing to show for it. Raise n_ubatch or lower "
-                    "spec.draft_max.");
+                    "would draft at a cost with nothing to show for it. Raise n_batch/n_ubatch or "
+                    "lower spec.draft_max.");
     }
 
     // overlap is meaningless without streaming (it gates the streamer's own reads). The

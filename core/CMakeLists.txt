@@ -31,14 +31,19 @@ if(BMOE_HAVE_LLAMA)
         src/engine/chat_parse.cpp
         src/engine/thinking_control.cpp
         src/engine/runtime.cpp
+        src/multimodal/mtmd_runtime.cpp
+        src/multimodal/media_io.cpp
         src/metrics/csv_metrics_sink.cpp
         src/metrics/route_trace_sink.cpp
         src/metrics/decode_trace_sink.cpp
     )
     # `llama` is the stable public API the streaming seam uses. `llama-common` (llama.cpp's
-    # `common` utils) is linked only for chat-template rendering + reasoning parsing
-    # (common_chat_*); it is not a stable API. It propagates the common/ and vendor/ includes.
+    # `common` utils) is linked only for chat-template rendering, reasoning parsing, and its
+    # template-delimited reasoning-budget sampler; it is not a stable API. It propagates the
+    # common/ and vendor/ includes.
     target_link_libraries(bmoe_core PUBLIC llama llama-common)
+    # libmtmd is intentionally private: public bmoe headers expose only byte buffers/config.
+    target_link_libraries(bmoe_core PRIVATE mtmd)
     target_compile_definitions(bmoe_core PUBLIC BMOE_HAVE_LLAMA=1)
     find_package(Threads REQUIRED)
     target_link_libraries(bmoe_core PUBLIC Threads::Threads)

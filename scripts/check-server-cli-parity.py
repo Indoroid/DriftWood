@@ -15,7 +15,9 @@ def parsed_options(source: str) -> set[str]:
     return set(re.findall(r'a == "(-{1,2}[a-z][a-z0-9-]*)"', source))
 
 
-cli_options = parsed_options(CLI)
+# File-backed media flags are CLI-only. The server accepts the equivalent image/audio
+# bytes in OpenAI content parts, so dead command-line aliases would not be parity.
+cli_options = parsed_options(CLI) - {"--image", "--audio", "--media"}
 server_options = parsed_options(SERVER)
 
 # --prompt remains accepted for script compatibility, but its value is intentionally ignored because
