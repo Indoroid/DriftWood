@@ -56,6 +56,10 @@ names and leave the unused slot last:
 The slot order is an internal binding order. The streamer does not assign
 semantic meaning to a slot after it binds the tensor name.
 
+`cohere2moe` and `hy_v3` can use either the split or fused layout in llama.cpp.
+Meitte checks the GGUF tensor names before capture and chooses the matching recipe;
+one GGUF must use the same expert layout across its MoE layers.
+
 Use the `general.architecture` value from the converted GGUF. GLM-5.2 and
 GLM-5.3 use `glm-dsa`, GLM-5.3 Flash uses `glm5next`, and Nemotron 3/3.5/H
 MoE uses `nemotron_h_moe`. NVIDIA's Hugging Face configs use

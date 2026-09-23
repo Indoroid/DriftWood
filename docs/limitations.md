@@ -52,13 +52,23 @@ serial path, and only a single ~25-line hook (with an explicit sunset) for the o
 - **CPU execution only.** Models, streamed experts, projectors, and draft contexts use CPU buffers.
   GPU offload and iOS targets are outside the current plan.
 - **Shared experts stay resident.** Architectures with an always-on shared expert (e.g.
-  `gemma4`, `deepseek4`, `glm-dsa`, `glm5next`, and `nemotron_h_moe`) stream the routed experts but
+  `gemma4`, `deepseek4`, `glm-dsa`, `glm5next`, `nemotron_h_moe`, `cohere2moe`, `hy_v3`,
+  `hy_v4`, and `minimax-m3`) stream the routed experts but
   keep the shared expert — and any dense layers — resident (in the page cache, or in the
   engine's own buffers under `--dense-weights anon`),
   so the streamed fraction (and the memory saving) is smaller than for a purely routed model
   like `qwen3moe`. The same applies to architectures whose first blocks are dense by design
   (`lfm2moe` has a `leading_dense_block_count`): those blocks name no expert tensors, so they
   are never streamed.
+- **Mixed expert layouts within one GGUF are unsupported.** llama.cpp accepts fused gate/up
+  or separate gate/up expert tensors for `cohere2moe` and `hy_v3`. Meitte selects one layout
+  per model file and rejects a file that mixes them across layers. The pinned converter emits
+  split tensors for these families; supporting mixed files would require per-layer recipes.
+- **Inkling has no loader in the pinned llama.cpp.** The [draft upstream PR](https://github.com/ggml-org/llama.cpp/pull/25731)
+  adds an Inkling loader, converter, and new GGML attention operator, none of which are in
+  this submodule. Meitte cannot load or stream an Inkling GGUF until those llama.cpp changes
+  land in a compatible dependency; a streaming recipe can then be validated against its
+  expert tensor layout.
 - **A resident tensor can be larger than RAM, and then it is only ever mmap'd.** `qwen4exp`
   (Qwen3.8-Flash-Next) carries a 51B n-gram embedding table (`per_layer_token_embd`, ~28.8 GB at
   IQ4_NL) that the graph reads sixteen rows at a time through `get_rows`. It is not indexed by

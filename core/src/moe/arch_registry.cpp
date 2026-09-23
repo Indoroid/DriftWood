@@ -75,6 +75,12 @@ static const MoeRecipe k_recipes[] = {
     // non-expert weight. That makes the streamed fraction of this architecture unusually low —
     // see docs/limitations.md.
     {"qwen4exp", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"cohere2moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"hunyuan-moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"hy_v3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"hy_v4", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"minimax-m3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"mimo2", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
 };
 
 static const int k_n_recipes = (int) (sizeof(k_recipes) / sizeof(k_recipes[0]));

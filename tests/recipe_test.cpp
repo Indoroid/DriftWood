@@ -1,0 +1,26 @@
+#include "bmoe/recipe.h"
+
+#include <cstdlib>
+#include <cstring>
+
+static void check(bool value) {
+    if (!value) std::abort();
+}
+
+int main() {
+    const char * split[] = {"qwen3moe", "qwen2moe",  "qwen35moe",   "glm-dsa",  "glm5next",   "gpt-oss",
+                            "lfm2moe",  "deepseek4", "bailingmoe3", "qwen4exp", "cohere2moe", "hunyuan-moe",
+                            "hy_v3",    "hy_v4",     "minimax-m3",  "mimo2"};
+    for (const char * arch : split) {
+        const meitte::MoeRecipe * recipe = meitte::find_moe_recipe(arch);
+        check(recipe && std::strcmp(recipe->exps_suffix[0], "ffn_gate_exps") == 0);
+        check(std::strcmp(recipe->exps_suffix[1], "ffn_up_exps") == 0);
+        check(std::strcmp(recipe->exps_suffix[2], "ffn_down_exps") == 0);
+    }
+    const meitte::MoeRecipe * fused = meitte::find_moe_recipe("gemma4");
+    const meitte::MoeRecipe * up_down = meitte::find_moe_recipe("nemotron_h_moe");
+    check(fused && std::strcmp(fused->exps_suffix[0], "ffn_gate_up_exps") == 0);
+    check(up_down && std::strcmp(up_down->exps_suffix[0], "ffn_up_exps") == 0);
+    check(meitte::n_moe_recipes() == 18);
+    check(meitte::find_moe_recipe("inkling") == nullptr);
+}

@@ -73,6 +73,16 @@ The following GGUF `general.architecture` values are supported for expert stream
 | `deepseek4` | DeepSeek V4 Flash |
 | `bailingmoe3` | Ling 3.0 |
 | `qwen4exp` | Qwen3.8 Flash-Next / Qwen4 preview |
+| `cohere2moe` | Cohere North MoE |
+| `hunyuan-moe` | Hunyuan MoE |
+| `hy_v3` | Hunyuan HY V3 |
+| `hy_v4` | Hunyuan HY V4 |
+| `minimax-m3` | MiniMax M3 |
+| `mimo2` | MiMo V2 Flash and V2.5 series |
+
+DeepSeek V4 Flash Vision Exp uses the existing `deepseek4` text architecture and a
+separate `deepseek4v` vision projector. Cohere2MoE and HY V3 accept split or fused
+gate/up expert tensors; Meitte selects the layout from the GGUF.
 
 The registry is intentionally explicit: a model is supported only when its expert tensor layout is
 known to preserve the native GGUF streaming invariant. See `docs/adding-a-model.md` for adding a

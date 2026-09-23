@@ -920,11 +920,34 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     im.arch = arch;
 
     const MoeRecipe * recipe = nullptr;
+    MoeRecipe resolved_recipe{};
     if (cfg.moe.enabled) {
         recipe = find_moe_recipe(arch);
         if (!recipe)
             return fail(std::string("no MoE recipe for architecture '") + arch +
                         "' — add one in core/src/moe/arch_registry.cpp (see docs/adding-a-model.md)");
+        // llama.cpp accepts fused gate/up or separate gate/up tensors for these architectures.
+        // Use the GGUF names before capture. Then the hook can find every routed weight.
+        if (im.arch == "cohere2moe" || im.arch == "hy_v3") {
+            const GgufOffsets & offs = meta().offsets;
+            if (!offs.ok) return fail("cannot read gguf offsets: " + cfg.model_path);
+            bool fused = false;
+            bool split = false;
+            const int n_layers = im.n_layer + (cfg.spec.is_mtp() ? im.n_layer_nextn : 0);
+            for (int i = 0; i < n_layers; ++i) {
+                const std::string layer = "blk." + std::to_string(i) + ".";
+                fused |= offs.off_by_name.count(layer + "ffn_gate_up_exps.weight") != 0;
+                split |= offs.off_by_name.count(layer + "ffn_gate_exps.weight") != 0;
+            }
+            if (fused && split) return fail("mixed fused and split MoE expert layouts are unsupported");
+            if (fused) {
+                resolved_recipe = *recipe;
+                resolved_recipe.exps_suffix[0] = "ffn_gate_up_exps";
+                resolved_recipe.exps_suffix[1] = "ffn_down_exps";
+                resolved_recipe.exps_suffix[2] = nullptr;
+                recipe = &resolved_recipe;
+            }
+        }
     }
 
     // Chat templates are model-bound: initialise once here, apply per prompt in generate().

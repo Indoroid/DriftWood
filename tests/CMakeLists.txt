@@ -4,6 +4,10 @@
 add_executable(bmoe_moe_gates moe_gates.cpp)
 target_link_libraries(bmoe_moe_gates PRIVATE bmoe_core)
 
+add_executable(bmoe_recipe_test recipe_test.cpp)
+target_link_libraries(bmoe_recipe_test PRIVATE bmoe_core)
+add_test(NAME moe_recipes COMMAND bmoe_recipe_test)
+
 add_executable(bmoe_chat_parse_test chat_parse_test.cpp)
 target_link_libraries(bmoe_chat_parse_test PRIVATE bmoe_core)
 target_include_directories(bmoe_chat_parse_test PRIVATE ${CMAKE_SOURCE_DIR}/core/src/engine)
