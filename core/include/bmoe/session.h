@@ -59,6 +59,7 @@ struct SessionConfig {
     bool compute_trace_layers = false;
     SamplingConfig sampling; // fixed for the session; greedy by default (temp <= 0)
     MoeStreamConfig moe;
+    RunConfig::DenseStreamConfig dense_stream;
     // Self-speculative decoding, and which source drafts. Fixed for the session: it decides whether
     // open() builds the wider verify batch, and — for the MTP source only — the draft context.
     // See RunConfig::spec.
@@ -293,6 +294,10 @@ public:
 
     // Score a fixed text under teacher forcing. Clears the KV; leaves no conversation state behind.
     PplResult perplexity(const PplRequest & req);
+
+    // Owned copy of the last computed logits row for exact identity checks. Empty if no row exists.
+    // Call between evaluations; the next decode replaces the backend row.
+    std::vector<float> copy_logits() const;
 
 private:
     Session();

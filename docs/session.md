@@ -74,6 +74,8 @@ overlap alike). It leaves the model and cache intact; the returned `RunResult` h
 true`. In chat mode a cancel **rolls the turn back** to the reused prefix (dropping this turn's KV
 and un-appending the user message) so prior turns stay usable and the conversation can continue.
 Cancel is distinct from a fatal streaming error, which is sticky and ends the session.
+Dense streaming drains interrupted reads before the next turn, clears the active matrix
+window and keeps the fixed resident set; the next turn uses the same tensor addresses.
 
 ## Context capacity and opt-in recovery
 

@@ -11,13 +11,32 @@ BigMoeOnEdge is an engineering package, not a new technique. The ideas it combin
 - **PowerInfer / EdgeMoE** — hot/cold expert locality and expert-granularity residency on
   the edge.
 
-The contribution here is a clean, modular, llama.cpp-native implementation of
-expert-selective streaming that stays lossless and runs on the public API — no fork for the
-serial path, and only a single ~25-line hook (with an explicit sunset) for the optional
-`--overlap` feature. See [seam.md § 3](seam.md).
+The serial expert and dense streaming paths use llama.cpp's public API. Optional CPU overlap
+uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4](seam.md).
 
 ## Limitations
 
+- **Dense streaming is a whole-matrix path validated for text.** It accepts GGUF models with zero experts
+  when capture finds native file-backed `MUL_MAT` matrix leaves. It reads the streamed matrix set
+  on each token, even if only a few rows would suffice. A larger fixed set lowers reads at the cost
+  of more RAM. On the 14 GiB host, Qwen3.8 27B Q4_0 completed three-token serial and
+  overlap text runs with a 2 GiB fixed set and 1 GiB window; a full mmap decode had previously
+  exhausted memory. A two-token NVMe-counter A/B on the same host measured 12.7 GiB of device reads
+  per generated token and 0.223 tokens/s with a 2 GiB fixed set. With a 10 GiB fixed set, it read
+  4.7 GiB per token at 0.474 tokens/s; peak RSS was 11.9 GiB and the process did not swap. A cold
+  `llama_model_load` read 13.6 GiB through the model mapping before dense capture. These are short
+  tuning runs, not sustained benchmarks. No multimodal projector was available for this model. The
+  remedy for larger gathered tensors is a proven row-only capture policy, not a model-name exception.
+- **Dense mode does not use an MTP draft context.** The trunk capture does not classify the
+  separate next-token prediction graph or guarantee its matrix lifetimes; `--mtp` therefore fails
+  at open with a clear error. N-gram drafting has no separate graph.
+- **Dense overlap is limited to one active session per process.** The synced CPU weight-ready hook
+  has one process-wide callback and user pointer. A second overlap session fails at open; serial
+  dense sessions remain available. A per-context callback upstream would remove this limit.
+- **Dense window and auto budget are conservative.** A two-adjacent-layer window is required by
+  one-layer lookahead, and initialization reports the minimum when the configured window is too
+  small. The automatic fixed set reserves 7 GiB plus the I/O window from `MemAvailable`; actual
+  context, batch and OS pressure vary, so peak RSS and faults must be checked for each deployment.
 - **Unified KV is a libllama layout option, not server concurrency.** `--kv-unified` works in the
   core, CLI, and server and is passed directly to libllama. Meitte still owns one sequence and the
   server still processes one conversation at a time, so the flag does not provide independent

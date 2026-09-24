@@ -39,6 +39,7 @@ if(BMOE_HAVE_LLAMA)
         src/io/file_reader.cpp
         src/io/mapping_release.cpp
         src/moe/dense_weights.cpp
+        src/moe/dense_stream.cpp
         src/moe/row_stream.cpp
         src/moe/gguf_offsets.cpp
         src/moe/expert_stream_source.cpp
@@ -99,6 +100,10 @@ if(BMOE_HAVE_LLAMA)
             message(STATUS "bmoe: expert-ready hook present (I/O–compute overlap available)")
         else()
             message(STATUS "bmoe: expert-ready hook absent (overlap unavailable)")
+        endif()
+        if(_ggml_cpu_src MATCHES "ggml_cpu_set_weight_ready_hook")
+            target_compile_definitions(bmoe_core PUBLIC BMOE_HAVE_WEIGHT_READY_HOOK=1)
+            message(STATUS "bmoe: dense weight-ready hook present")
         endif()
     else()
         message(STATUS "bmoe: expert-ready hook absent (overlap unavailable)")

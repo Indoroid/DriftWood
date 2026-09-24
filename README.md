@@ -1,8 +1,8 @@
 # Meitte
 
-Meitte runs large Mixture-of-Experts (MoE) GGUF models locally when keeping every expert in RAM is
-impractical. It builds on llama.cpp and streams the expert weights selected for each token from
-local storage, while keeping the model's native GGUF layout intact.
+Meitte runs large GGUF models locally when the weights do not fit in RAM. It builds on llama.cpp
+and streams either the experts selected by a Mixture-of-Experts (MoE) model or whole matrices of a
+dense model from local storage, while keeping the native GGUF layout intact.
 
 Meitte provides both a command-line runner and an OpenAI-compatible local server. It also supports
 multimodal models, persistent conversations, KV-cache configuration, custom chat templates, and
@@ -45,6 +45,8 @@ overrides, when used, are limited to fully resident tensors rather than the stre
 - Optional `libmeitte` C ABI for FFI callers; a Python `ctypes` smoke example is included.
 - MoE expert streaming with direct I/O where the platform supports it, bounded expert caching, and
   optional cache-aware routing.
+- CPU dense-matrix streaming for zero-expert models, with a fixed resident set and bounded layer
+  window; optional matrix-read overlap uses the synced llama.cpp CPU readiness callback.
 - Optional model-mapping release after a safe streamed load. This restores concurrent unbuffered
   read scaling on Windows and also fixes tied output heads under anonymous dense-weight placement.
 - Image, audio, and sampled-video prompts with an `--mmproj` projector for supported models.
@@ -88,6 +90,9 @@ The registry is intentionally explicit: a model is supported only when its exper
 known to preserve the native GGUF streaming invariant. See `docs/adding-a-model.md` for adding a
 new architecture safely.
 
+Dense streaming does not use an expert recipe. The `qwen35` Qwen3.8 27B text GGUF has been run in
+this mode; its separate multimodal projector was not available for this validation.
+
 ## Quick Start
 
 Initialize the llama.cpp submodule and build the host binaries:
@@ -105,6 +110,22 @@ build/cli/meitte-cli \
   --moe-stream --cache-mb auto \
   --chatml -p "Explain what a mixture-of-experts model is."
 ```
+
+For a dense model that exceeds RAM, start with a small context and physical batch:
+
+```bash
+build/cli/meitte-cli \
+  -m /path/to/dense-model.gguf \
+  --dense-stream --dense-resident-mb 0 --dense-window-mb 1024 \
+  --dense-io-lanes 2 --batch-size 1 --ubatch-size 1 \
+  -c 128 -n 3 -p "Hi" --progress
+```
+
+`--dense-resident-mb 0` (the default) sizes the fixed set from available RAM while reserving
+7 GiB plus the window for other memory. `--dense-overlap` enables the fork's CPU matrix-ready
+callback; `--dense-two-wave` publishes the first projection before staging the rest and requires
+overlap. Dense mode currently streams text inference without an MTP draft context.
+The same dense flags are available in `meitte-server` for persistent text sessions.
 
 Start an OpenAI-compatible server:
 
@@ -154,6 +175,7 @@ ctest --output-on-failure
 
 The `bmoe_moe_gates` tests verify that streamed experts produce byte-identical results to resident
 experts. Run them after changing the streamer, the llama.cpp seam, or model recipes.
+The `dense_*` tests check stable backing and byte-identical logits for serial and overlap paths.
 
 ## Documentation
 

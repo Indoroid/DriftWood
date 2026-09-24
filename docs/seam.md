@@ -1,6 +1,6 @@
 # The seam: how we hook llama.cpp without forking it
 
-Expert streaming connects BigMoeOnEdge to llama.cpp through two public mechanisms.
+Expert and dense streaming connect Meitte to llama.cpp through public mechanisms.
 Multimodal input uses the separate mtmd boundary documented below. This file records both
 contracts so they can be re-verified when the submodule is updated.
 
@@ -39,10 +39,15 @@ come from the arch's recipe — `ffn_{gate,up,down}_exps` for the split layout,
 experts) and record the live `ggml_tensor*`. We return false
 throughout — capture observes, it does not isolate. `ggml_tensor` is a public struct, so
 reading `->name`, `->ne`, `->nb` and writing `->data` is public API surface.
+For dense mode, the same scan records GGUF weight leaves and `MUL_MAT` matrix sources without an
+MoE recipe. The eval abort callback stops compute after the scheduler has called `ask` for the
+graph, so a greater-than-RAM capture does not run a full forward pass.
 
 **Stream phase** (real generation). We return true for `ffn_moe_topk-<il>`. The
 non-ask callback then hands us that node with the selected expert ids materialized; we
 gather them (stride-aware) and trigger the slice reads.
+For dense mode, we isolate the first node of each layer. Its non-ask callback fills that
+layer's matrices and starts one-layer lookahead; serial mode waits before the layer continues.
 
 Two optional jobs ask for more: the route trace and
 [cache-aware dropping](expert-dropping.md) also want each layer's `ffn_moe_weights*-<il>` chain,
@@ -68,7 +73,7 @@ Model loading also stays on the public API: `llama_model_params.load_mode` is fi
 `LLAMA_LOAD_MODE_MMAP`, and `use_extra_bufts=false` prevents repacking before tensor rebinding.
 The CLI and server expose llama.cpp's placement-only `--override-tensor PATTERN=BUFFER_TYPE` API
 for fully resident runs. It selects a buffer while the model loads; it does not rewrite the GGUF.
-It is rejected with `--moe-stream`, because an arbitrary regex could place a streamed expert in a
+It is rejected with streaming, because an arbitrary regex could place a streamed tensor in a
 different buffer and invalidate the native-offset rebinding contract. `--list-buffer-types` reports
 the buffer names registered by the current build.
 
@@ -91,8 +96,8 @@ the layer compute. Overlapping the two — reading a token's experts while the s
 expert matmuls are running — needs a wait point that no public API exposes. That is the one
 place where BigMoeOnEdge carries a llama.cpp extension.
 
-**What it is.** A single optional hook, 16 added lines, living on the fork branch
-`bmoe/expert-ready-hook` of `Indoroid/llama.cpp` as a single commit on top of the upstream
+**What it is.** An optional hook living on the fork branch
+`bmoe/expert-ready-hook` of `Indoroid/llama.cpp` on top of the upstream
 pin. It adds nothing to the model files and changes no data layout; it is a callback the
 CPU MoE kernel invokes.
 
@@ -123,8 +128,14 @@ whole project still compiles and runs — the serial streaming path is unchanged
 `--overlap` is affected, and it fails with a clear runtime error instead of silently
 falling back.
 
-**Sunset condition.** This fork exists *solely* for this one hook. The moment upstream
-ships an equivalent per-expert readiness/residency callback, the branch is dropped and the
+The synced variant also exports `ggml_cpu_set_weight_ready_hook(ggml_weight_ready_hook_t, void *)`.
+CPU `MUL_MAT` calls it before reading `src0`; a false return aborts the graph. Dense overlap uses
+it to wait for a complete matrix, while serial dense mode works without it. CMake defines
+`BMOE_HAVE_WEIGHT_READY_HOOK` only when this symbol is present. Neither callback reads files or
+owns tensor storage; both only guard reads from the bound native-layout buffers.
+
+**Sunset condition.** This fork exists for these CPU wait points. When upstream
+ships equivalent callbacks, the branch is dropped and the
 submodule bumps straight back to `ggml-org/llama.cpp`. It is a tide-me-over until the wait
 point is public, not a divergence we intend to maintain.
 
@@ -215,10 +226,10 @@ returns. This is how `ggml_backend_sched` implements the eval-callback today
 ## Upgrading llama.cpp
 
 Because the submodule pins the `bmoe/expert-ready-hook` fork branch (section 4), a bump
-rebases that 1-commit branch onto the new upstream tag, re-pushes it, and re-pins:
+rebases the callback branch onto the new upstream tag, re-pushes it, and re-pins:
 
 ```bash
-# in an Indoroid/llama.cpp checkout: rebase the single hook commit onto the new tag
+# in an Indoroid/llama.cpp checkout: rebase the CPU callback branch onto the new tag
 git fetch upstream && git checkout bmoe/expert-ready-hook
 git rebase <newer-upstream-tag> && git push --force-with-lease origin bmoe/expert-ready-hook
 

@@ -53,6 +53,11 @@ public:
                      r.dense_weights.c_str(), (double) r.drop_cold_frac, r.drop_renorm, r.drop_prefill,
                      (double) r.substitute_lambda);
         std::fprintf(f_,
+                     "# dense_stream=%d dense_resident_mb=%d dense_window_mb=%d dense_io_lanes=%d "
+                     "dense_overlap=%d dense_two_wave=%d dense_direct=%d\n",
+                     r.dense_stream, r.dense_resident_mb, r.dense_window_mb, r.dense_io_lanes, r.dense_overlap,
+                     r.dense_two_wave, r.dense_direct);
+        std::fprintf(f_,
                      "# temp=%.4g top_k=%d top_p=%.4g seed=%u compute_trace_layers=%d spec=%s "
                      "spec_draft_max=%d mtp_p_min=%.4g ngram_min_match=%d\n",
                      (double) r.temp, r.top_k, (double) r.top_p, r.seed, r.compute_trace_layers, r.spec.c_str(),
@@ -64,54 +69,57 @@ public:
         write_header(); // a caller that never sent RunInfo still gets a readable file
         std::fprintf(f_,
                      "%d,%d,%.3f,%.3f,%.3f,%llu,%.2f,%.3f,%.3f,%llu,%.3f,%.3f,%d,%.2f,%.1f,%.1f,%.1f,"
-                     "%.1f,%.1f,%.1f,%.1f,%.1f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                     "%.1f,%.1f,%.1f,%.1f,%.1f,%.3f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
                      m.step, m.steps, m.wall_ms, m.io_ms, m.compute_ms, (unsigned long long) m.read_bytes,
                      m.cache_hit_pct, m.stall_ms, m.mgmt_ms, (unsigned long long) m.majflt, m.cpu_ms,
                      m.dense_resident_frac, m.turn, m.majflt_mib, m.cache_budget_mib, m.rss_mib, m.rss_anon_mib,
                      m.rss_file_mib, m.swap_mib, m.mem_available_mib, m.mem_free_mib, m.swap_free_mib,
-                     m.loop_overhead_ms, m.mtp_batch, m.mtp_draft_ms, m.drain_ms, m.adopt_ms, m.ra_issue_ms,
-                     m.ra_wd_ms);
+                     m.loop_overhead_ms, m.mtp_batch, m.mtp_draft_ms, m.drain_ms, m.adopt_ms, m.ra_issue_ms, m.ra_wd_ms,
+                     m.dense_window_resident_frac);
         std::fflush(f_);
     }
     void on_summary(const RunSummary & s) override {
         // Run-level trailer parsed by scripts/bench-analyze.py as whitespace-separated key=value
         // tokens (order-independent). New keys are appended freely; older parsers ignore unknowns.
-        std::fprintf(f_,
-                     "# summary tokens=%d s/tok=%.3f tok/s=%.3f read_MiB=%.1f "
-                     "io_s=%.2f compute_s/tok=%.3f io_s/tok=%.3f cache_hit_pct=%.1f "
-                     "n_prompt=%d load_s=%.3f prefill_s=%.3f prefill_tps=%.2f stall_s/tok=%.3f mgmt_s/tok=%.3f "
-                     "cache_resident_MiB=%.1f cache_budget_MiB=%.1f cache_resizes=%lld "
-                     "spec_read_MiB=%.1f spec_experts=%lld spec_useful=%lld "
-                     "majflt/tok=%.2f cpu_s/tok=%.4f token_demand_MiB=%.1f layer_demand_MiB=%.1f "
-                     "experts_routed=%lld experts_dropped=%lld experts_reranked=%lld experts_substituted=%lld "
-                     "loop_overhead_s/tok=%.4f "
-                     "mtp_drafted=%lld mtp_accepted=%lld mtp_decodes=%lld mtp_draft_s/tok=%.4f "
-                     "drafted_steps=%lld "
-                     "ra_committed=%lld ra_passthrough=%lld ra_agree_pct=%.1f ra_gemv_ms/tok=%.2f "
-                     "ra_issue_ms/tok=%.2f ra_wd_ms/tok=%.2f drain_s/tok=%.3f adopt_s/tok=%.3f "
-                     "evictions=%lld rereads=%lld "
-                     "media_prepare_s=%.3f media_projector_s=%.3f "
-                     "prefill_cpu_s=%.3f prefill_read_mib=%.1f prefill_io_s=%.3f "
-                     "prefill_stall_s=%.3f prefill_mgmt_s=%.3f "
-                     "row_table_MiB=%.1f row_resident_MiB=%.1f row_rows=%lld row_reads=%lld "
-                     "row_read_MiB=%.1f row_evictions=%lld row_io_errors=%lld\n",
-                     s.n_generated, s.s_per_token, s.tokens_per_second, s.moe_read_mib, s.moe_io_seconds,
-                     s.moe_compute_s_per_token, s.moe_io_s_per_token, s.cache_hit_pct, s.n_prompt, s.load_seconds,
-                     s.prefill_seconds, s.prefill_seconds > 0 ? s.n_prompt / s.prefill_seconds : 0.0,
-                     s.moe_stall_s_per_token, s.moe_mgmt_s_per_token, s.cache_resident_mib, s.cache_budget_mib,
-                     s.cache_resizes, s.moe_spec_read_mib, s.moe_spec_experts, s.moe_spec_useful, s.majflt_per_token,
-                     s.cpu_s_per_token, s.token_demand_mib, s.layer_demand_mib, s.experts_routed, s.experts_dropped,
-                     s.experts_reranked, s.experts_substituted, s.loop_overhead_s_per_token, s.mtp_drafted,
-                     s.mtp_accepted, s.mtp_decodes, s.mtp_draft_s_per_token, s.drafted_steps, s.route_ahead_overridden,
-                     s.route_ahead_passthrough,
-                     s.route_ahead_slots > 0 ? 100.0 * s.route_ahead_hits / s.route_ahead_slots : 0.0,
-                     s.n_generated ? s.route_ahead_gemv_ns / 1e6 / s.n_generated : 0.0,
-                     s.n_generated ? s.route_ahead_issue_ns / 1e6 / s.n_generated : 0.0,
-                     s.n_generated ? s.route_ahead_wd_ns / 1e6 / s.n_generated : 0.0, s.moe_drain_s_per_token,
-                     s.moe_adopt_s_per_token, s.cache_evictions, s.cache_rereads, s.media_prepare_seconds,
-                     s.media_projector_seconds, s.prefill_cpu_seconds, s.prefill_read_mib, s.prefill_io_seconds,
-                     s.prefill_stall_seconds, s.prefill_mgmt_seconds, s.row_table_mib, s.row_resident_mib, s.row_rows,
-                     s.row_slab_reads, s.row_read_mib, s.row_evictions, s.row_io_errors);
+        std::fprintf(
+            f_,
+            "# summary tokens=%d s/tok=%.3f tok/s=%.3f read_MiB=%.1f "
+            "io_s=%.2f compute_s/tok=%.3f io_s/tok=%.3f cache_hit_pct=%.1f "
+            "n_prompt=%d load_s=%.3f prefill_s=%.3f prefill_tps=%.2f stall_s/tok=%.3f mgmt_s/tok=%.3f "
+            "cache_resident_MiB=%.1f cache_budget_MiB=%.1f cache_resizes=%lld "
+            "spec_read_MiB=%.1f spec_experts=%lld spec_useful=%lld "
+            "majflt/tok=%.2f cpu_s/tok=%.4f token_demand_MiB=%.1f layer_demand_MiB=%.1f "
+            "experts_routed=%lld experts_dropped=%lld experts_reranked=%lld experts_substituted=%lld "
+            "loop_overhead_s/tok=%.4f "
+            "mtp_drafted=%lld mtp_accepted=%lld mtp_decodes=%lld mtp_draft_s/tok=%.4f "
+            "drafted_steps=%lld "
+            "ra_committed=%lld ra_passthrough=%lld ra_agree_pct=%.1f ra_gemv_ms/tok=%.2f "
+            "ra_issue_ms/tok=%.2f ra_wd_ms/tok=%.2f drain_s/tok=%.3f adopt_s/tok=%.3f "
+            "evictions=%lld rereads=%lld "
+            "media_prepare_s=%.3f media_projector_s=%.3f "
+            "prefill_cpu_s=%.3f prefill_read_mib=%.1f prefill_io_s=%.3f "
+            "prefill_stall_s=%.3f prefill_mgmt_s=%.3f "
+            "row_table_MiB=%.1f row_resident_MiB=%.1f row_rows=%lld row_reads=%lld "
+            "row_read_MiB=%.1f row_evictions=%lld row_io_errors=%lld "
+            "dense_read_mib=%.1f dense_io_s=%.3f dense_wait_s=%.3f "
+            "prefill_majflt=%llu prefill_peak_rss_mib=%.1f decode_peak_rss_mib=%.1f\n",
+            s.n_generated, s.s_per_token, s.tokens_per_second, s.moe_read_mib, s.moe_io_seconds,
+            s.moe_compute_s_per_token, s.moe_io_s_per_token, s.cache_hit_pct, s.n_prompt, s.load_seconds,
+            s.prefill_seconds, s.prefill_seconds > 0 ? s.n_prompt / s.prefill_seconds : 0.0, s.moe_stall_s_per_token,
+            s.moe_mgmt_s_per_token, s.cache_resident_mib, s.cache_budget_mib, s.cache_resizes, s.moe_spec_read_mib,
+            s.moe_spec_experts, s.moe_spec_useful, s.majflt_per_token, s.cpu_s_per_token, s.token_demand_mib,
+            s.layer_demand_mib, s.experts_routed, s.experts_dropped, s.experts_reranked, s.experts_substituted,
+            s.loop_overhead_s_per_token, s.mtp_drafted, s.mtp_accepted, s.mtp_decodes, s.mtp_draft_s_per_token,
+            s.drafted_steps, s.route_ahead_overridden, s.route_ahead_passthrough,
+            s.route_ahead_slots > 0 ? 100.0 * s.route_ahead_hits / s.route_ahead_slots : 0.0,
+            s.n_generated ? s.route_ahead_gemv_ns / 1e6 / s.n_generated : 0.0,
+            s.n_generated ? s.route_ahead_issue_ns / 1e6 / s.n_generated : 0.0,
+            s.n_generated ? s.route_ahead_wd_ns / 1e6 / s.n_generated : 0.0, s.moe_drain_s_per_token,
+            s.moe_adopt_s_per_token, s.cache_evictions, s.cache_rereads, s.media_prepare_seconds,
+            s.media_projector_seconds, s.prefill_cpu_seconds, s.prefill_read_mib, s.prefill_io_seconds,
+            s.prefill_stall_seconds, s.prefill_mgmt_seconds, s.row_table_mib, s.row_resident_mib, s.row_rows,
+            s.row_slab_reads, s.row_read_mib, s.row_evictions, s.row_io_errors, s.dense_read_mib, s.dense_io_seconds,
+            s.dense_wait_seconds, (unsigned long long) s.prefill_majflt, s.prefill_peak_rss_mib, s.decode_peak_rss_mib);
         std::fflush(f_);
     }
 
@@ -132,7 +140,8 @@ private:
         std::fprintf(f_, "step,steps,wall_ms,io_ms,compute_ms,read_bytes,cache_hit_pct,stall_ms,mgmt_ms,majflt,cpu_ms,"
                          "dense_resident_frac,turn,majflt_mib,cache_budget_mib,rss_mib,rss_anon_mib,"
                          "rss_file_mib,swap_mib,mem_available_mib,mem_free_mib,swap_free_mib,loop_overhead_ms,"
-                         "mtp_batch,mtp_draft_ms,drain_ms,adopt_ms,ra_issue_ms,ra_wd_ms\n");
+                         "mtp_batch,mtp_draft_ms,drain_ms,adopt_ms,ra_issue_ms,ra_wd_ms,"
+                         "dense_window_resident_frac\n");
     }
 
     std::FILE * f_ = nullptr;

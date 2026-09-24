@@ -1,15 +1,9 @@
 # BigMoeOnEdge — top-level build.
 #
-# The engine (`bmoe_core`) depends only on its own public headers under include/bmoe
-# and on llama.cpp's PUBLIC C API (llama.h / ggml.h). The serial streaming path never
-# touches llama.cpp internals: MoE expert streaming is driven entirely through the public
-# eval-callback and public gguf accessors, so it tracks upstream with nothing more than a
-# submodule pointer bump — no in-tree patch. The one exception is the optional `--overlap`
-# feature, which needs a per-expert wait point the public API does not expose: the submodule
-# pins a fork branch (`bmoe/expert-ready-hook` on Indoroid/llama.cpp) adding one small
-# readiness hook, detected here as BMOE_HAVE_EXPERT_READY_HOOK. It is zero-cost when absent,
-# the serial path still builds against stock upstream, and it sunsets the moment upstream
-# ships an equivalent callback. See docs/seam.md § 3.
+# The engine (`bmoe_core`) uses llama.cpp's public model, GGUF and eval-callback APIs for
+# serial expert and dense streaming. Optional CPU overlap uses expert and matrix readiness
+# callbacks from the synced llama.cpp fork. The serial path builds against stock upstream.
+# See docs/seam.md § 4.
 #
 # llama.cpp is an optional dependency at configure time: when the submodule is absent
 # only the pure-policy code (config validation) compiles, so the scaffold and a subset
@@ -18,8 +12,9 @@ cmake_minimum_required(VERSION 3.21)
 
 # The version is declared here and nowhere else in the build: the engine reports it (meitte-cli
 # --version, and the run-parameter preamble of every metrics CSV), so a committed benchmark file
-# says which engine produced it. Keep it in step with CHANGELOG.md and the app's versionName.
-project(bigmoeonedge VERSION 0.23.0 LANGUAGES C CXX)
+# says which engine produced it. Keep it in step with CHANGELOG.md; align the app's versionName
+# when preparing a release.
+project(bigmoeonedge VERSION 0.24.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

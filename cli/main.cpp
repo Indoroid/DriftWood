@@ -108,11 +108,12 @@ static void emit_progress_line(const TokenMetrics & m, ProgressDelta & st) {
     std::printf("BMOE_PROGRESS {\"step\":%d,\"steps\":%d,\"wall_ms\":%.1f,\"io_ms\":%.1f,"
                 "\"compute_ms\":%.1f,\"mgmt_ms\":%.1f,\"stall_ms\":%.1f,\"read_mb\":%.2f,"
                 "\"cache_hit_pct\":%.1f,\"majflt\":%llu,\"cpu_ms\":%.1f,\"dense_resident_frac\":%.3f,"
+                "\"dense_window_resident_frac\":%.3f,"
                 "%s\"delta_reasoning\":\"%s\",\"delta_text\":\"%s\"}\n",
                 m.step, m.steps, m.wall_ms, m.io_ms, m.compute_ms, m.mgmt_ms, m.stall_ms,
                 m.read_bytes / (1024.0 * 1024.0), m.cache_hit_pct, (unsigned long long) m.majflt, m.cpu_ms,
-                m.dense_resident_frac, ext ? "" : "\"reset\":1,", json_escape(d_reason).c_str(),
-                json_escape(d_text).c_str());
+                m.dense_resident_frac, m.dense_window_resident_frac, ext ? "" : "\"reset\":1,",
+                json_escape(d_reason).c_str(), json_escape(d_text).c_str());
     st.reasoning = m.reasoning;
     st.text = m.text;
     std::fflush(stdout);
@@ -255,6 +256,8 @@ static int run_session_loop(const RunConfig & cfg,
                     "\"prefill_cpu_s\":%.3f,\"prefill_read_mib\":%.1f,\"prefill_io_s\":%.3f,"
                     "\"media_prepare_s\":%.3f,\"media_projector_s\":%.3f,"
                     "\"prefill_stall_s\":%.3f,\"prefill_mgmt_s\":%.3f,"
+                    "\"dense_read_mib\":%.1f,\"dense_io_s\":%.3f,\"dense_wait_s\":%.3f,"
+                    "\"prefill_majflt\":%llu,\"prefill_peak_rss_mib\":%.1f,\"decode_peak_rss_mib\":%.1f,"
                     "\"token_demand_mib\":%.1f,\"mtp_drafted\":%lld,\"mtp_accepted\":%lld,\"mtp_decodes\":%lld,"
                     "\"mtp_draft_s_tok\":%.4f,\"drafted_steps\":%lld,\"loop_overhead_s_tok\":%.4f,"
                     "\"reasoning\":\"%s\",\"text\":\"%s\"}\n",
@@ -264,9 +267,11 @@ static int run_session_loop(const RunConfig & cfg,
                     s.cache_budget_mib, s.moe_read_mib, s.moe_stall_s_per_token, s.moe_mgmt_s_per_token,
                     s.majflt_per_token, s.cpu_s_per_token, s.prefill_cpu_seconds, s.prefill_read_mib,
                     s.prefill_io_seconds, s.media_prepare_seconds, s.media_projector_seconds, s.prefill_stall_seconds,
-                    s.prefill_mgmt_seconds, s.token_demand_mib, s.mtp_drafted, s.mtp_accepted, s.mtp_decodes,
-                    s.mtp_draft_s_per_token, s.drafted_steps, s.loop_overhead_s_per_token,
-                    json_escape(r.reasoning_text).c_str(), json_escape(r.generated_text).c_str());
+                    s.prefill_mgmt_seconds, s.dense_read_mib, s.dense_io_seconds, s.dense_wait_seconds,
+                    (unsigned long long) s.prefill_majflt, s.prefill_peak_rss_mib, s.decode_peak_rss_mib,
+                    s.token_demand_mib, s.mtp_drafted, s.mtp_accepted, s.mtp_decodes, s.mtp_draft_s_per_token,
+                    s.drafted_steps, s.loop_overhead_s_per_token, json_escape(r.reasoning_text).c_str(),
+                    json_escape(r.generated_text).c_str());
         std::fflush(stdout);
     }
 
@@ -396,6 +401,14 @@ static void print_usage(const char * argv0) {
         "      --ngram-min-match N --ngram only: shortest run of matching tokens allowed to draft\n"
         "                          (default 3). The confidence gate: raise it for fewer, better\n"
         "                          drafts, lower it for coverage\n"
+        "\n"
+        "  Dense streaming:\n"
+        "      --dense-stream      stream dense CPU matrices through a bounded window\n"
+        "      --dense-resident-mb N  fixed dense set in MiB (0 = RAM-based auto budget)\n"
+        "      --dense-window-mb N    active matrix window in MiB (default 1024)\n"
+        "      --dense-io-lanes N     positioned I/O lanes, 1 or 2 (default 2)\n"
+        "      --dense-overlap        use the CPU weight-ready hook for overlap\n"
+        "      --dense-two-wave       publish the first matrix of a layer first\n"
         "\n"
         "  MoE expert streaming:\n"
         "      --moe-stream        stream only the routed experts per token (MoE models)\n"
@@ -766,6 +779,18 @@ int main(int argc, char ** argv) {
             io_trace_path = next("--io-trace");
         else if (a == "--moe-stream")
             cfg.moe.enabled = true;
+        else if (a == "--dense-stream")
+            cfg.dense_stream.enabled = true;
+        else if (a == "--dense-resident-mb")
+            cfg.dense_stream.resident_mb = std::atoi(next("--dense-resident-mb"));
+        else if (a == "--dense-window-mb")
+            cfg.dense_stream.window_mb = std::atoi(next("--dense-window-mb"));
+        else if (a == "--dense-io-lanes")
+            cfg.dense_stream.io_lanes = std::atoi(next("--dense-io-lanes"));
+        else if (a == "--dense-overlap")
+            cfg.dense_stream.overlap = true;
+        else if (a == "--dense-two-wave")
+            cfg.dense_stream.two_wave = true;
         else if (a == "--cache-mb") {
             const std::string v = next("--cache-mb");
             if (v == "auto")
@@ -1184,7 +1209,11 @@ int main(int argc, char ** argv) {
                              : cfg.moe.dense_weights == DenseWeightsMode::Warmed ? "warm"
                              : cfg.moe.dense_weights == DenseWeightsMode::Pinned ? "ahwb"
                                                                                  : "anon";
-        if (cfg.moe.enabled) {
+        if (cfg.dense_stream.enabled) {
+            std::printf("mode: dense streaming, fixed %s, window %d MiB, %d I/O lane(s)%s\n",
+                        cfg.dense_stream.resident_mb ? "budget" : "auto budget", cfg.dense_stream.window_mb,
+                        cfg.dense_stream.io_lanes, cfg.dense_stream.overlap ? ", overlap" : ", serial");
+        } else if (cfg.moe.enabled) {
             char cache[64];
             if (cfg.moe.cache_auto)
                 std::snprintf(cache, sizeof(cache), "cache auto");
@@ -1203,6 +1232,14 @@ int main(int argc, char ** argv) {
                         "lists the supported ones)\n",
                         s.arch.empty() ? "the model" : s.arch.c_str());
         }
+    }
+    if (cfg.dense_stream.enabled) {
+        std::printf("dense-stream: prefill read %.1f MiB, %.3f s I/O, %.3f s wait, %llu major faults, "
+                    "peak sampled RSS %.0f MiB; decode read %.1f MiB, %.3f s I/O, %.3f s wait, "
+                    "peak sampled RSS %.0f MiB\n",
+                    s.prefill_read_mib, s.prefill_io_seconds, s.prefill_stall_seconds,
+                    (unsigned long long) s.prefill_majflt, s.prefill_peak_rss_mib, s.dense_read_mib, s.dense_io_seconds,
+                    s.dense_wait_seconds, s.decode_peak_rss_mib);
     }
     if (cfg.moe.enabled) {
         std::printf("moe-stream: read %.1f MiB (%.2f MiB/token), decode %.3f s/token "

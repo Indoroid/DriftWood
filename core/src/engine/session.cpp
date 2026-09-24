@@ -11,11 +11,15 @@
 #include "../moe/router_hook.h"
 #include "../moe/expert_stream_source.h"
 #include "../moe/gguf_offsets.h"
+#include "../moe/dense_stream.h"
 #include "../io/platform_io.h"
 #include "../io/mapping_release.h"
 
 #include "llama.h"
 #include "ggml.h"
+#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
+#include "ggml-cpu.h"
+#endif
 
 // llama.cpp's `common` layer (NOT the stable public API): chat-template rendering and
 // reasoning parsing. See the note in the root CMakeLists / docs/seam.md.
@@ -34,7 +38,9 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <map>
 #include <limits>
+#include <tuple>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -47,6 +53,9 @@ namespace meitte {
 namespace {
 
 using clock_t_ = std::chrono::steady_clock;
+#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
+std::atomic<bool> dense_weight_hook_active{false};
+#endif
 double secs(clock_t_::time_point a, clock_t_::time_point b) {
     return std::chrono::duration<double>(b - a).count();
 }
@@ -386,6 +395,10 @@ struct Session::Impl {
     llama_context_params context_params{};
     std::unique_ptr<RouterHook> hook; // heap: its address is baked into cparams.cb_eval_user_data
     ExpertStreamSource source;
+    DenseWeights dense_fixed;
+    DenseStream dense_stream;
+    std::atomic<bool> capture_abort{false};
+    bool weight_hook_registered = false;
 
     // The MTP draft source (SpecConfig::source == mtp). A SECOND context over the SAME model,
     // created with ctx_type = MTP so llama.cpp builds the nextn graph instead of the trunk one. It
@@ -597,6 +610,14 @@ struct Session::Impl {
         // buffers back the rebound expert tensors), then the context (its eval callback points
         // at the hook), then the hook, then unmap the model, then release the backend.
         source.shutdown();
+#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
+        if (weight_hook_registered) {
+            ggml_cpu_set_weight_ready_hook(nullptr, nullptr);
+            dense_weight_hook_active.store(false, std::memory_order_release);
+        }
+#endif
+        dense_stream.shutdown();
+        dense_fixed.shutdown();
         if (smpl) llama_sampler_free(smpl); // independent of ctx/model; free before them
         // The speculative driver holds both contexts and detaches the backend samplers it
         // installed on the draft one, so it goes before either context is freed.
@@ -631,6 +652,10 @@ int Session::n_ctx() const {
 int Session::n_expert_used() const {
     return impl_->n_expert_used;
 }
+std::vector<float> Session::copy_logits() const {
+    const float * row = impl_->ctx ? llama_get_logits_ith(impl_->ctx.get(), -1) : nullptr;
+    return row ? std::vector<float>(row, row + impl_->n_vocab) : std::vector<float>();
+}
 ThinkControl Session::think_control() const {
     return impl_->think_ctl;
 }
@@ -641,6 +666,12 @@ void Session::set_cache_budget_mb(int mib) {
 PplResult Session::perplexity(const PplRequest & req) {
     auto & im = *impl_;
     PplResult r;
+    if (im.cfg.dense_stream.enabled && im.cancel_requested.load(std::memory_order_acquire) &&
+        !im.dense_stream.reset_after_cancel()) {
+        r.error = "dense stream could not recover after cancellation";
+        return r;
+    }
+    im.cancel_requested.store(false, std::memory_order_release);
     const auto t0 = clock_t_::now();
     llama_context * ctx = im.ctx.get();
 
@@ -675,6 +706,7 @@ PplResult Session::perplexity(const PplRequest & req) {
         llama_batch warm = llama_batch_init(1, 0, 1);
         batch_fill(warm, tokens.data(), 1, 0, false);
         im.hook->set_batch_phase(req.as_decode ? 1 : 0);
+        im.hook->begin_graph();
         const int rc = llama_decode(ctx, warm);
         llama_batch_free(warm);
         if (rc != 0) {
@@ -727,6 +759,7 @@ PplResult Session::perplexity(const PplRequest & req) {
         const int prefix = std::max(1, std::min(req.skip, n - 1));
         batch_fill(b, tokens.data(), prefix, /*pos0*/ 0, /*all_logits*/ false);
         im.hook->set_batch_phase(0);
+        im.hook->begin_graph();
         if (llama_decode(ctx, b) != 0) {
             r.error = "prefill decode failed";
             return r;
@@ -736,6 +769,7 @@ PplResult Session::perplexity(const PplRequest & req) {
         for (int pos = prefix; pos < last; ++pos) {
             batch_fill(b, tokens.data() + pos, 1, pos, /*all_logits*/ true);
             im.hook->set_batch_phase(1);
+            im.hook->begin_graph();
             if (llama_decode(ctx, b) != 0) {
                 r.error = "decode failed at position " + std::to_string(pos);
                 return r;
@@ -749,6 +783,7 @@ PplResult Session::perplexity(const PplRequest & req) {
             const int chunk = std::min(im.cfg.n_batch, n - i);
             batch_fill(b, tokens.data() + i, chunk, /*pos0*/ i, /*all_logits*/ true);
             im.hook->set_batch_phase(req.as_decode ? 1 : 0);
+            im.hook->begin_graph();
             if (llama_decode(ctx, b) != 0) {
                 r.error = "decode failed at position " + std::to_string(i);
                 return r;
@@ -805,6 +840,7 @@ PplResult Session::perplexity(const PplRequest & req) {
 
 void Session::cancel() {
     impl_->cancel_requested.store(true, std::memory_order_relaxed);
+    impl_->dense_stream.notify_cancel();
 }
 
 std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
@@ -820,6 +856,16 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     if (input_cfg.n_ctx <= 0) return fail("n_ctx must be positive");
     if (input_cfg.n_batch <= 0) return fail("n_batch must be positive");
     if (input_cfg.n_ubatch < 0) return fail("n_ubatch must be >= 0");
+    if (input_cfg.dense_stream.enabled &&
+        (input_cfg.moe.enabled || input_cfg.dense_stream.resident_mb < 0 || input_cfg.dense_stream.window_mb <= 0 ||
+         input_cfg.dense_stream.io_lanes < 1 || input_cfg.dense_stream.io_lanes > 2 ||
+         (input_cfg.dense_stream.two_wave && !input_cfg.dense_stream.overlap) || input_cfg.spec.is_mtp() ||
+         !input_cfg.tensor_buffer_overrides.empty()))
+        return fail("invalid dense streaming configuration");
+#ifndef BMOE_HAVE_WEIGHT_READY_HOOK
+    if (input_cfg.dense_stream.enabled && input_cfg.dense_stream.overlap)
+        return fail("dense overlap requires the CPU weight-ready hook");
+#endif
     if (input_cfg.context.min_ctx < 0 || input_cfg.context.max_ctx < 0 || input_cfg.context.min_ctx > input_cfg.n_ctx ||
         (input_cfg.context.max_ctx && input_cfg.context.max_ctx < input_cfg.n_ctx) ||
         (input_cfg.context.grow != ContextMode::Off && !input_cfg.context.max_ctx))
@@ -1005,7 +1051,7 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     // The streamer needs the callback to see routing; the compute trace needs it to time nodes.
     // Installing it for the trace alone is what lets a NON-streamed run be measured — the dense
     // mmap baseline the streamed numbers are argued against.
-    if (cfg.moe.enabled || compute_trace) {
+    if (cfg.moe.enabled || cfg.dense_stream.enabled || compute_trace) {
         cparams.cb_eval = &RouterHook::c_eval;
         cparams.cb_eval_user_data = im.hook.get();
     }
@@ -1077,7 +1123,9 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
         ctx,
         [](void * ud) -> bool {
             auto * p = static_cast<Impl *>(ud);
-            return p->cancel_requested.load(std::memory_order_relaxed) || p->hook->fatal() || p->source.fatal();
+            return p->capture_abort.load(std::memory_order_acquire) ||
+                   p->cancel_requested.load(std::memory_order_relaxed) || p->hook->fatal() || p->source.fatal() ||
+                   p->dense_stream.fatal();
         },
         &im);
 
@@ -1108,6 +1156,131 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
         im.mtp_batch = llama_batch_init(std::max(cfg.n_batch, cfg.spec.draft_max + 1), /*embd*/ 0, /*n_seq_max*/ 1);
         im.mtp_batch_owned = true;
         im.draft_buf.reserve((size_t) cfg.spec.draft_max);
+    }
+
+    if (cfg.dense_stream.enabled) {
+        const GgufOffsets & offs = meta().offsets;
+        if (!offs.ok) return fail("cannot read gguf offsets: " + cfg.model_path);
+        if (meta().info.n_expert > 0) return fail("dense streaming requires a model with zero experts");
+
+        // The scheduler offers every node to the ask callback before it computes the graph. Abort
+        // the capture graph at compute start so a >RAM model never makes a full warm-up pass.
+        im.hook->begin_capture();
+        im.capture_abort.store(true, std::memory_order_release);
+        llama_token token = llama_vocab_bos(im.vocab);
+        if (token < 0) token = 0;
+        llama_batch warm = llama_batch_get_one(&token, 1);
+        const int capture_rc = llama_decode(ctx, warm);
+        im.capture_abort.store(false, std::memory_order_release);
+        im.hook->end_capture();
+        if (capture_rc == 0 || im.hook->captured_weight_objects().empty())
+            return fail("dense graph capture did not abort before compute with weights captured");
+        pio::ProcessMemory capture_memory;
+        if (pio::process_memory(&capture_memory))
+            std::fprintf(stderr, "bmoe: dense capture — %zu weight leaves, RSS %llu MiB before weight reads\n",
+                         im.hook->captured_weight_objects().size(),
+                         (unsigned long long) (capture_memory.rss_bytes >> 20));
+        llama_memory_clear(llama_get_memory(ctx), true);
+
+        std::vector<DenseTensorRef> fixed, candidates;
+        std::map<std::tuple<int, uint64_t, uint64_t>, size_t> seen;
+        for (ggml_tensor * tensor : im.hook->captured_weight_objects()) {
+            if (!tensor) continue;
+            const std::string name = tensor->name;
+            auto off = offs.off_by_name.find(name);
+            auto size = offs.size_by_name.find(name);
+            auto type = offs.type_by_name.find(name);
+            if (off == offs.off_by_name.end() || size == offs.size_by_name.end() || type == offs.type_by_name.end())
+                continue; // graph input, not a GGUF weight
+            if (!tensor->data || !ggml_is_contiguous(tensor) || ggml_nbytes(tensor) != size->second ||
+                (int) tensor->type != type->second)
+                return fail("dense GGUF type, size, strides or backing mismatch: " + name);
+            const int shard = offs.file_by_name.at(name);
+            const auto key = std::make_tuple(shard, off->second, size->second);
+            auto found = seen.find(key);
+            if (found != seen.end()) {
+                DenseTensorRef & owner = fixed[found->second];
+                if (owner.tensor->type != tensor->type)
+                    return fail("dense alias type mismatch for GGUF file range: " + name);
+                owner.aliases.push_back(tensor);
+                int alias_layer = -1;
+                if (std::sscanf(name.c_str(), "blk.%d.", &alias_layer) != 1 || alias_layer != owner.layer ||
+                    !im.hook->captured_matrix_weights().count(name) || im.hook->early_matrix_weights().count(name))
+                    owner.layer = -1; // a tied output or gather keeps its shared range resident
+                continue;
+            }
+            DenseTensorRef ref;
+            ref.tensor = tensor;
+            ref.file_idx = shard;
+            ref.file_off = off->second;
+            ref.size = size->second;
+            int layer = -1;
+            if (std::sscanf(name.c_str(), "blk.%d.", &layer) == 1 && layer >= 0 && layer < im.n_layer &&
+                im.hook->captured_matrix_weights().count(name) && !im.hook->early_matrix_weights().count(name))
+                ref.layer = layer;
+            seen.emplace(key, fixed.size());
+            fixed.push_back(std::move(ref));
+        }
+        if (fixed.empty()) return fail("dense capture found no GGUF weight leaves");
+        // Alias groups are classified together. The fixed set includes controls, embeddings and
+        // output weights; the remaining budget pins the earliest matrices across every token.
+        uint64_t compulsory = 0;
+        for (const DenseTensorRef & ref : fixed)
+            if (ref.layer < 0) compulsory += ref.size;
+        const uint64_t window = (uint64_t) cfg.dense_stream.window_mb << 20;
+        const uint64_t available = pio::mem_available_bytes();
+        const uint64_t auto_budget = available > (7ull << 30) + window ? available - (7ull << 30) - window : 0;
+        const uint64_t budget =
+            cfg.dense_stream.resident_mb ? (uint64_t) cfg.dense_stream.resident_mb << 20 : auto_budget;
+        if (compulsory > budget)
+            return fail("dense resident budget is smaller than embeddings, output and control tensors (need " +
+                        std::to_string((compulsory + (1 << 20) - 1) >> 20) + " MiB)");
+        std::stable_sort(fixed.begin(), fixed.end(),
+                         [](const DenseTensorRef & a, const DenseTensorRef & b) { return a.layer < b.layer; });
+        uint64_t pinned_bytes = compulsory;
+        std::vector<DenseTensorRef> pinned;
+        for (DenseTensorRef & ref : fixed) {
+            if (ref.layer < 0 || pinned_bytes + ref.size <= budget) {
+                if (ref.layer >= 0) pinned_bytes += ref.size;
+                pinned.push_back(std::move(ref));
+            } else
+                candidates.push_back(std::move(ref));
+        }
+        if (candidates.empty()) return fail("dense stream selected no matrices; lower resident budget or use mmap");
+        std::vector<const void *> mapped_addresses;
+        for (const DenseTensorRef & ref : candidates) {
+            mapped_addresses.push_back(ref.tensor->data);
+            for (const ggml_tensor * alias : ref.aliases)
+                if (alias) mapped_addresses.push_back(alias->data);
+        }
+        if (pio::addresses_in_file_mappings(offs.shard_paths, mapped_addresses) != mapped_addresses.size())
+            return fail("dense stream requires native file-backed GGUF matrix pointers");
+        const size_t n_streamed = candidates.size();
+        // The anonymous owner reads the fixed set once. The bounded streamer rebinds the rest to
+        // stable reserved addresses and commits pages only while their layer is active.
+        if (!im.dense_fixed.init(DenseWeightsMode::Anonymous, offs.shard_paths, 4096, {}, std::move(pinned)))
+            return fail("dense fixed-resident load failed");
+        if (!im.dense_stream.init(std::move(candidates), offs.shard_paths, 4096, window, cfg.dense_stream.io_lanes,
+                                  cfg.dense_stream.overlap, cfg.dense_stream.two_wave, &im.cancel_requested))
+            return fail("dense stream setup failed");
+        im.hook->set_dense_stream(&im.dense_stream);
+#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
+        if (cfg.dense_stream.overlap) {
+            bool expected = false;
+            if (!dense_weight_hook_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+                return fail("only one dense overlap session can use the process-wide CPU hook at a time");
+            ggml_cpu_set_weight_ready_hook(
+                [](const ggml_tensor * src0, void * ud) -> bool {
+                    return static_cast<DenseStream *>(ud)->weight_ready(src0);
+                },
+                &im.dense_stream);
+            im.weight_hook_registered = true;
+        }
+#endif
+        std::fprintf(stderr,
+                     "bmoe: dense stream — fixed %llu MiB, window %llu MiB, %zu streamed matrices, direct I/O %s\n",
+                     (unsigned long long) (pinned_bytes >> 20), (unsigned long long) (window >> 20), n_streamed,
+                     im.dense_stream.direct() ? "on" : "off");
     }
 
     if (cfg.moe.enabled) {
@@ -1383,6 +1556,13 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
         ri.drop_renorm = cfg.moe.drop_renorm;
         ri.drop_prefill = cfg.moe.drop_prefill;
         ri.substitute_lambda = cfg.moe.enabled ? cfg.moe.substitute_lambda : 0.0f;
+        ri.dense_stream = cfg.dense_stream.enabled;
+        ri.dense_resident_mb = cfg.dense_stream.resident_mb;
+        ri.dense_window_mb = cfg.dense_stream.window_mb;
+        ri.dense_io_lanes = cfg.dense_stream.enabled ? cfg.dense_stream.io_lanes : 0;
+        ri.dense_overlap = cfg.dense_stream.enabled && cfg.dense_stream.overlap;
+        ri.dense_two_wave = cfg.dense_stream.enabled && cfg.dense_stream.two_wave;
+        ri.dense_direct = cfg.dense_stream.enabled && im.dense_stream.direct();
         // The CSV keeps the two familiar flags, derived from the resolved dense-weights policy.
         ri.dense_weights = cfg.moe.dense_weights == DenseWeightsMode::Mmap        ? "mmap"
                            : cfg.moe.dense_weights == DenseWeightsMode::Anonymous ? "anon"
@@ -1473,16 +1653,17 @@ RunResult Session::generate(const GenerateRequest & req,
         im.info_sent = true;
     }
 
-    // Fresh cancel latch for this generation; a stale request from a prior aborted call must
-    // not carry over. (cancel() sets it; the abort callback reads it.)
-    im.cancel_requested.store(false, std::memory_order_relaxed);
-
     RunResult res;
     auto fail = [&](std::string msg) {
         res.ok = false;
         res.error = std::move(msg);
         return res;
     };
+    // Let interrupted dense reads stop before the next generation can reuse their addresses.
+    if (im.cfg.dense_stream.enabled && im.cancel_requested.load(std::memory_order_acquire) &&
+        !im.dense_stream.reset_after_cancel())
+        return fail("dense stream could not recover after cancellation");
+    im.cancel_requested.store(false, std::memory_order_release);
     if (req.n_predict <= 0 || req.n_predict > std::numeric_limits<int>::max() - 8)
         return fail("n_predict must be positive and leave room for context accounting");
 
@@ -2010,6 +2191,7 @@ RunResult Session::generate(const GenerateRequest & req,
         // Not a trace concern, but the same per-decode frame: the drop policy is decode-only
         // unless armed for prefill, so it has to be told which phase this batch is.
         im.hook->set_batch_phase(phase);
+        im.hook->begin_graph();
         if (im.route_trace)
             im.hook->begin_trace_batch(base_pos, n_tokens, phase, im.turn, static_cast<uint8_t>(media_kind));
         // A node is computed once for the whole batch, not per token, so a prefill chunk's graph is
@@ -2065,6 +2247,11 @@ RunResult Session::generate(const GenerateRequest & req,
     // The session layer already holds everything needed; the streamer is untouched.
     PrefillTally prefill_tally;
     prefill_tally.begin(moe.enabled, im.source);
+    const uint64_t prefill_faults0 = pio::major_faults();
+    const uint64_t dense_prefill_bytes0 = im.dense_stream.read_bytes();
+    const uint64_t dense_prefill_io0 = im.dense_stream.io_ns();
+    const uint64_t dense_prefill_wait0 = im.dense_stream.wait_ns();
+    double prefill_peak_rss = 0.0;
     const auto t_prefill0 = clock_t_::now();
     // Two predicates, deliberately distinct. spec_on is "the verify loop runs" — a wide batch, an
     // accept pass, a rollback — and both sources need all of it. mtp_on is "the draft comes from the
@@ -2160,6 +2347,11 @@ RunResult Session::generate(const GenerateRequest & req,
                 if (moe.overlap && im.source.fatal()) return fail("expert stream I/O failed during overlap prefill");
                 return fail("prefill decode failed");
             }
+            if (im.cfg.dense_stream.enabled) {
+                pio::ProcessMemory pm;
+                if (pio::process_memory(&pm))
+                    prefill_peak_rss = std::max(prefill_peak_rss, pm.rss_bytes / (1024.0 * 1024.0));
+            }
             trace_flush();
             if (mtp_on && !common_speculative_process(im.mtp.get(), pf))
                 return fail("MTP draft context failed to process the prefill batch");
@@ -2176,6 +2368,12 @@ RunResult Session::generate(const GenerateRequest & req,
     // token. Read with the same rules: io is summed lane busy time under overlap, stall is the
     // union of stalled intervals, cpu is whole-process (upper bound on compute-thread time).
     prefill_tally.end(moe.enabled, im.source);
+    const uint64_t prefill_faults = pio::major_faults() - prefill_faults0;
+    if (im.cfg.dense_stream.enabled) {
+        prefill_tally.read_mib = (im.dense_stream.read_bytes() - dense_prefill_bytes0) / (1024.0 * 1024.0);
+        prefill_tally.io_seconds = (im.dense_stream.io_ns() - dense_prefill_io0) / 1e9;
+        prefill_tally.stall_seconds = (im.dense_stream.wait_ns() - dense_prefill_wait0) / 1e9;
+    }
     const float * logits = llama_get_logits_ith(ctx, -1);
     if (chat_on) im.kv_last_generation_start = im.kv_tokens.size();
 
@@ -2194,6 +2392,13 @@ RunResult Session::generate(const GenerateRequest & req,
     // prior prompts' totals; the deltas make each prompt self-relative.
     GenTally tally;
     tally.overlap = moe.overlap;
+    uint64_t dense_prev_bytes = im.dense_stream.read_bytes();
+    uint64_t dense_prev_io = im.dense_stream.io_ns();
+    uint64_t dense_prev_wait = im.dense_stream.wait_ns();
+    const uint64_t dense_decode_bytes0 = dense_prev_bytes;
+    const uint64_t dense_decode_io0 = dense_prev_io;
+    const uint64_t dense_decode_wait0 = dense_prev_wait;
+    double decode_peak_rss = 0.0;
     if (moe.enabled) {
         const IExpertSource::Stats & st0 = prefill_tally.post;
         tally.prev_bytes = (long long) st0.read_bytes;
@@ -2533,6 +2738,22 @@ RunResult Session::generate(const GenerateRequest & req,
                 tally.record(m, wall, f1 - f0, c1 - c0, im.turn, moe.enabled ? &st : nullptr);
             else
                 tally.record(m, 0.0, 0, 0.0, im.turn, moe.enabled ? &st : nullptr);
+            if (im.cfg.dense_stream.enabled && e == 0) {
+                const uint64_t bytes = im.dense_stream.read_bytes();
+                const uint64_t io_ns = im.dense_stream.io_ns();
+                const uint64_t wait_ns = im.dense_stream.wait_ns();
+                m.read_bytes = bytes - dense_prev_bytes;
+                m.io_ms = (io_ns - dense_prev_io) / 1e6;
+                m.stall_ms = (wait_ns - dense_prev_wait) / 1e6;
+                m.compute_ms = std::max(0.0, m.wall_ms - m.stall_ms);
+                im.dense_fixed.sample_residency(pio::vm_page());
+                m.dense_resident_frac = im.dense_fixed.resident_frac();
+                m.dense_window_resident_frac = im.dense_stream.sample_residency();
+                dense_prev_bytes = bytes;
+                dense_prev_io = io_ns;
+                dense_prev_wait = wait_ns;
+                decode_peak_rss = std::max(decode_peak_rss, m.rss_mib);
+            }
             if (on_token) on_token(m);
             if (sink) sink->on_token(m);
         }
@@ -2592,6 +2813,14 @@ RunResult Session::generate(const GenerateRequest & req,
     s.prefill_io_seconds = prefill_tally.io_seconds;
     s.prefill_stall_seconds = prefill_tally.stall_seconds;
     s.prefill_mgmt_seconds = prefill_tally.mgmt_seconds;
+    s.prefill_majflt = prefill_faults;
+    s.prefill_peak_rss_mib = prefill_peak_rss;
+    s.decode_peak_rss_mib = decode_peak_rss;
+    if (im.cfg.dense_stream.enabled) {
+        s.dense_read_mib = (im.dense_stream.read_bytes() - dense_decode_bytes0) / (1024.0 * 1024.0);
+        s.dense_io_seconds = (im.dense_stream.io_ns() - dense_decode_io0) / 1e9;
+        s.dense_wait_seconds = (im.dense_stream.wait_ns() - dense_decode_wait0) / 1e9;
+    }
     s.majflt_per_token = n_gen ? (double) tally.majflt / n_gen : 0.0;
     s.cpu_s_per_token = n_gen ? tally.cpu_seconds / n_gen : 0.0;
     if (moe.enabled) {

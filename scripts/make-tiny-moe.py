@@ -152,6 +152,59 @@ def build_qwen3moe(out, split_max_tensors=0):
           f"(top-{N_EXPERT_USED}), vocab {n_vocab}")
 
 
+def build_qwen3dense(out, dtype):
+    """Dense fixture with enough matrices to exercise a 1 MiB fixed set and a streamed tail."""
+    tokens, scores, toktypes = build_vocab()
+    embd, ff, layers, heads, kv_heads = 256, 512, 8, 8, 4
+    w = gguf.GGUFWriter(out, "qwen3")
+    w.add_name("tiny-dense")
+    w.add_context_length(N_CTX)
+    w.add_embedding_length(embd)
+    w.add_block_count(layers)
+    w.add_feed_forward_length(ff)
+    w.add_head_count(heads)
+    w.add_head_count_kv(kv_heads)
+    w.add_key_length(32)
+    w.add_value_length(32)
+    w.add_rope_freq_base(ROPE_BASE)
+    w.add_layer_norm_rms_eps(RMS_EPS)
+    w.add_file_type(gguf.LlamaFileType.MOSTLY_Q4_0 if dtype == "q4_0" else gguf.LlamaFileType.MOSTLY_F16)
+    add_tokenizer(w, tokens, scores, toktypes)
+
+    def add(name, shape, seed):
+        data = rnd(*shape, seed=seed)
+        if len(shape) == 2:
+            if dtype == "q4_0":
+                w.add_tensor(name, gguf.quantize(data, gguf.GGMLQuantizationType.Q4_0),
+                             raw_dtype=gguf.GGMLQuantizationType.Q4_0)
+            else:
+                w.add_tensor(name, data.astype(np.float16))
+        else:
+            w.add_tensor(name, data)
+
+    add("token_embd.weight", (len(tokens), embd), 1)
+    add("output_norm.weight", (embd,), 2)
+    add("output.weight", (len(tokens), embd), 3)
+    for i in range(layers):
+        p, seed = f"blk.{i}.", 100 + 100 * i
+        add(p + "attn_norm.weight", (embd,), seed)
+        add(p + "attn_q.weight", (embd, embd), seed + 1)
+        add(p + "attn_k.weight", (kv_heads * 32, embd), seed + 2)
+        add(p + "attn_v.weight", (kv_heads * 32, embd), seed + 3)
+        add(p + "attn_output.weight", (embd, embd), seed + 4)
+        add(p + "attn_q_norm.weight", (32,), seed + 5)
+        add(p + "attn_k_norm.weight", (32,), seed + 6)
+        add(p + "ffn_norm.weight", (embd,), seed + 7)
+        add(p + "ffn_gate.weight", (ff, embd), seed + 8)
+        add(p + "ffn_up.weight", (ff, embd), seed + 9)
+        add(p + "ffn_down.weight", (embd, ff), seed + 10)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    print(f"wrote {out}: qwen3 dense {dtype}, {layers} layers")
+
+
 # --- gemma4: fused gate+up layout --------------------------------------------------
 # Gemma 4 MoE packs gate+up into one expert tensor (ffn_gate_up_exps) and keeps an
 # always-on shared expert (the layer's dense ffn_{gate,up,down}). We interleave one dense
@@ -239,13 +292,16 @@ def build_gemma4(out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arch", choices=["qwen3moe", "gemma4"], default="qwen3moe")
+    ap.add_argument("--arch", choices=["qwen3moe", "gemma4", "qwen3dense"], default="qwen3moe")
+    ap.add_argument("--type", choices=["f16", "q4_0"], default="f16")
     ap.add_argument("--out", default="tiny-moe.gguf")
     ap.add_argument("--split-max-tensors", type=int, default=0,
                     help="emit a sharded gguf (N tensors per shard, metadata-only first shard)")
     args = ap.parse_args()
 
-    if args.arch == "gemma4":
+    if args.arch == "qwen3dense":
+        build_qwen3dense(args.out, args.type)
+    elif args.arch == "gemma4":
         if args.split_max_tensors:
             raise SystemExit("--split-max-tensors is exercised via the qwen3moe fixture only")
         build_gemma4(args.out)

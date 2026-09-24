@@ -52,6 +52,7 @@ struct TokenMetrics {
     // kernel dropping the model?). A diagnostic, read alongside `majflt` and the rss split — nothing
     // acts on it. See docs/pressure.md.
     double dense_resident_frac = -1.0;
+    double dense_window_resident_frac = -1.0; // active dense-stream pages; -1 outside dense mode
     // What those faults actually moved, in MiB (majflt × page size). The same fact as `majflt`, in
     // the unit the rest of this struct is in: 47447 faults is unreadable, 194 MiB re-faulted in one
     // token is immediately comparable to `read_bytes` — the reads we chose against the reads the
@@ -135,6 +136,12 @@ struct RunSummary {
     double prefill_io_seconds = 0.0;
     double prefill_stall_seconds = 0.0;
     double prefill_mgmt_seconds = 0.0;
+    uint64_t prefill_majflt = 0;
+    double prefill_peak_rss_mib = 0.0; // largest RSS sample during prefill
+    double decode_peak_rss_mib = 0.0;  // largest RSS sample after a decode
+    double dense_read_mib = 0.0;
+    double dense_io_seconds = 0.0;
+    double dense_wait_seconds = 0.0;
 
     // MoE streaming totals (zero when streaming is off)
     double moe_read_mib = 0.0;
@@ -341,6 +348,13 @@ struct RunInfo {
     bool drop_renorm = true;            // survivors rescaled to keep the routing's total mass
     bool drop_prefill = false;          // dropping armed during prefill too, where it discards far more
     float substitute_lambda = 0.0f;     // cache-aware substitution margin, a fraction of the score range (0 = off)
+    bool dense_stream = false;
+    int dense_resident_mb = 0; // 0 = auto budget
+    int dense_window_mb = 0;
+    int dense_io_lanes = 0;
+    bool dense_overlap = false;
+    bool dense_two_wave = false;
+    bool dense_direct = false; // effective mode of every dense shard reader
 
     // Sampling. Greedy (temp <= 0) is the default and the only deterministic one; the byte-identity
     // gates depend on it. A stochastic run and a greedy one are not comparable, and until these were

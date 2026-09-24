@@ -12,6 +12,7 @@ BMOE_LOAD {"mb":<float>,"ms":<float>}
 BMOE_PROGRESS {"step":<int>,"steps":<int>,"wall_ms":<float>,"io_ms":<float>,
                "compute_ms":<float>,"mgmt_ms":<float>,"stall_ms":<float>,"read_mb":<float>,
                "cache_hit_pct":<float>,"majflt":<int>,"cpu_ms":<float>,"dense_resident_frac":<float>,
+               "dense_window_resident_frac":<float>,
                ["reset":1,]"delta_reasoning":"<string>","delta_text":"<string>"}
 ```
 
@@ -20,6 +21,13 @@ BMOE_PROGRESS {"step":<int>,"steps":<int>,"wall_ms":<float>,"io_ms":<float>,
 - `BMOE_PROGRESS.step`/`steps` are 1-based index and target token counts.
 - `read_mb` is the flash bytes read this token; `stall_ms` is the overlap-only wall time compute
   lost to reads (0 in serial mode).
+- In `--dense-stream` mode, `read_mb` counts actual `FileReader` bytes, including alignment
+  amplification. `io_ms` sums read syscall time across the one or two I/O lanes. `stall_ms`
+  sums matrix-ready callback waits across threads, or the serial layer-boundary waits; it is
+  **not** the union-of-intervals MoE stall metric and can exceed wall time under parallel waits.
+  `dense_resident_frac` samples the pinned set and `dense_window_resident_frac` samples ready
+  matrices in the active window. `cache_hit_pct` and routing/prediction fields do not describe
+  dense weights and stay unset or zero. `majflt` counts major faults during decode.
 - `wall_ms` = total token time; `io_ms` = flash read time. `compute_ms` is a **residual, not a
   measured quantity**: no clock runs around llama.cpp's matmul kernels in a normal run, so compute
   is whatever wall time is left after the measured terms are subtracted — `wall_ms − io_ms −
@@ -117,6 +125,10 @@ BMOE_PROGRESS {"step":<int>,"steps":<int>,"wall_ms":<float>,"io_ms":<float>,
 generation: <n> tokens, <s> s/token (<t> tok/s)
 compute: <pct>% CPU occupancy (<c> cpu-s/token over <n> threads), <f> major faults/token
 mode: expert streaming, cache <auto|<n> MiB|off>, dense <mmap|warm|anon|ahwb>[, overlap]
+mode: dense streaming, fixed <budget|auto budget>, window <n> MiB, <n> I/O lane(s)[, overlap]
+dense-stream: prefill read <mib> MiB, <s> s I/O, <s> s wait, <n> major faults,
+              peak sampled RSS <mib> MiB; decode read <mib> MiB, <s> s I/O,
+              <s> s wait, peak sampled RSS <mib> MiB
 moe-stream: read <mib> MiB (<mib/tok> MiB/token), decode <s> s/token (compute <c> + cache mgmt <m> + flash I/O <i> s/token, <bw> MiB/s)
 moe-cache: <pct>% hit, resident <mib> MiB
 ```
@@ -269,6 +281,8 @@ prints just the summary lines.
   route_ahead=<n> predict_prefetch=<0|1> predict_log=<0|1> predict_spec_max=<n> prefetch_sync=<0|1>
   dense_weights=<mmap|warm|anon|ahwb> drop_cold_frac=<f> drop_renorm=<0|1> drop_prefill=<0|1>
   substitute_lambda=<f>
+# dense_stream=<0|1> dense_resident_mb=<n> dense_window_mb=<n> dense_io_lanes=<0|1|2>
+  dense_overlap=<0|1> dense_two_wave=<0|1> dense_direct=<0|1>
 # temp=<f> top_k=<n> top_p=<f> seed=<u> compute_trace_layers=<n> spec=<off|mtp|ngram>
   spec_draft_max=<n> mtp_p_min=<f> ngram_min_match=<n>
 ```
@@ -329,7 +343,7 @@ next to the `turn` column.
 step,steps,wall_ms,io_ms,compute_ms,read_bytes,cache_hit_pct,stall_ms,mgmt_ms,majflt,cpu_ms,
 dense_resident_frac,turn,majflt_mib,cache_budget_mib,rss_mib,rss_anon_mib,rss_file_mib,swap_mib,
 mem_available_mib,mem_free_mib,swap_free_mib,loop_overhead_ms,mtp_batch,mtp_draft_ms,drain_ms,
-adopt_ms,ra_issue_ms,ra_wd_ms
+adopt_ms,ra_issue_ms,ra_wd_ms,dense_window_resident_frac
 ```
 
 `stall_ms`, `mgmt_ms`, `majflt`, `cpu_ms` and `dense_resident_frac` are trailing columns appended
@@ -340,6 +354,8 @@ residual (see the `BMOE_PROGRESS` notes above), `0` when unmeasured; `dense_resi
 sampled dense-weight residency, `-1` when unmeasured. All are additive: older CSVs have fewer columns,
 so consumers must read by column NAME (from the header row) and treat any as optional. The `# summary`
 line likewise gains `stall_s/tok=<s>`, `mgmt_s/tok=<s>`, `majflt/tok=<f>`, `cpu_s/tok=<s>`,
+`dense_read_mib=<f>`, `dense_io_s=<s>`, `dense_wait_s=<s>`, `prefill_majflt=<n>`,
+`prefill_peak_rss_mib=<f>` and `decode_peak_rss_mib=<f>` for dense runs,
 `token_demand_MiB=<f>` (the expert bytes one token routes, measured — where cache hits start, NOT a
 floor to defend; see [pressure.md](pressure.md)), `experts_routed=<n>` / `experts_dropped=<n>` (what
 [cache-aware dropping](expert-dropping.md) actually discarded during generation — the flag sets a
@@ -531,6 +547,8 @@ BMOE_DONE  {"id":<int>,"cancelled":<bool>,"tokens":<int>,"tok_s":<float>,
             "prefill_cpu_s":<float>,"prefill_read_mib":<float>,"prefill_io_s":<float>,
             "media_prepare_s":<float>,"media_projector_s":<float>,
             "prefill_stall_s":<float>,"prefill_mgmt_s":<float>,
+            "dense_read_mib":<float>,"dense_io_s":<float>,"dense_wait_s":<float>,
+            "prefill_majflt":<int>,"prefill_peak_rss_mib":<float>,"decode_peak_rss_mib":<float>,
             "token_demand_mib":<float>,"mtp_drafted":<int>,"mtp_accepted":<int>,"mtp_decodes":<int>,
             "mtp_draft_s_tok":<float>,"drafted_steps":<int>,"loop_overhead_s_tok":<float>,
             "reasoning":"<string>","text":"<string>"}
@@ -594,12 +612,17 @@ prefilled **this turn** (the suffix after any reused KV prefix), and `n_past` is
 length after the turn — so a multi-turn UI can show both per-turn prefill cost and how full the
 context is. `prefill_tps` is the prompt prefill rate; `compute_s_tok`/`io_s_tok` are the per-token
 AVERAGES over the run (so a UI can show an average compute-vs-I/O split, not just the last token).
-`cache_resident_mib`/`cache_budget_mib` track the fixed cache, `read_mib` is the
-total flash streamed this generation, and `stall_s_tok`/`mgmt_s_tok` the per-token overlap stall and
-cache-management cost. `text` is the final answer and `reasoning` the final thinking span (empty
+`cache_resident_mib`/`cache_budget_mib` track the MoE cache. `read_mib` and
+`stall_s_tok`/`mgmt_s_tok` report MoE reads and overlap cost; dense runs use the separate
+`dense_read_mib`/`dense_wait_s` fields. `text` is the final answer and `reasoning` the final thinking span (empty
 unless the model reasoned), same split as the per-token lines. `BMOE_ERROR` with `fatal:false` is a rejected
 request (e.g. the prompt plus `n_predict` exceeds `n_ctx`) and leaves the session usable;
 `fatal:true` means the process is ending.
+
+For dense mode, `dense_read_mib`, `dense_io_s` and `dense_wait_s` cover decode only; the existing
+`prefill_read_mib`, `prefill_io_s` and `prefill_stall_s` cover prompt evaluation. Prefill and decode
+peak RSS values are maxima of process-memory samples at those phase boundaries, not the kernel's
+whole-process high-water mark. `prefill_majflt` is measured separately from decode `majflt_tok`.
 
 ## Decode traces
 
