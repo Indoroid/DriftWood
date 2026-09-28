@@ -129,6 +129,10 @@ The C ABI uses opaque session/result handles, copies request media before genera
 as owned result strings or caller-provided buffers, and does not let exceptions or llama.cpp types cross it.
 Installation places the matching llama, mtmd, and ggml runtime libraries beside `libmeitte`.
 
+The build separates the library from its frontends. `BMOE_BUILD_CLI=OFF` builds `libmeitte` and
+its core tests (gates, session, ABI) without compiling `cli/`; the host tests (CLI line protocol,
+HTTP server, CLI/server flag parity) are added only when `BMOE_BUILD_CLI=ON`.
+
 Greedy sampling makes the output a deterministic function of the graph — the property the
 [byte-identity gates](../tests/moe_gates.cpp) assert. That holds with the lossy knobs off. Under
 [`--drop-cold-experts`](expert-dropping.md) and

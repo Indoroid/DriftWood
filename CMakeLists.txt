@@ -24,8 +24,10 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Tests split along the same line as the build: core tests need only libmeitte; host tests (the
+# CLI line protocol, the HTTP server, CLI/server flag parity) are added only with the frontends.
 option(BMOE_BUILD_TESTS "Build byte-identity gates and unit tests" ON)
-option(BMOE_BUILD_CLI   "Build the meitte-cli host tool"            ON)
+option(BMOE_BUILD_CLI   "Build the meitte-cli and meitte-server frontends" ON)
 option(BMOE_BUILD_SHARED "Build libmeitte for C++ and C/FFI callers" OFF)
 # Off by default: diagnostics, not part of the product. They need no llama.cpp, so they can be
 # configured and cross-compiled on their own without building the engine.
@@ -62,7 +64,7 @@ endif()
 
 add_subdirectory(core)
 
-if((BMOE_BUILD_CLI OR BMOE_BUILD_TESTS) AND BMOE_HAVE_LLAMA)
+if(BMOE_BUILD_CLI AND BMOE_HAVE_LLAMA)
     add_subdirectory(cli)
 endif()
 

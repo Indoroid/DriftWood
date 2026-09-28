@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Build: `BMOE_BUILD_TESTS` no longer pulls in `cli/`. Core tests build against `libmeitte` alone
+  with `BMOE_BUILD_CLI=OFF`; the CLI protocol, server API and CLI/server parity tests are host tests
+  added only with `BMOE_BUILD_CLI=ON`.
+- Tests: session-level n-gram speculation (drafting, cancel/retry, reset) joins the transaction test.
 - Refuse a second expert-overlap session while another owns the process-wide ggml-cpu expert-ready
   hook. The second session used to take the hook over, so the first session's compute stopped
   waiting for its own expert reads. Dense overlap already had this guard.

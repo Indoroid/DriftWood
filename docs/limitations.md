@@ -46,7 +46,10 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   MTP draft source fails before prefill. Upstream `common_speculative_process` handles token batches
   but does not forward `batch.embd` to the draft context. N-gram drafting works because it needs only
   confirmed text IDs. The remedy is an upstream mixed token/embedding speculative API, not a local
-  copy of its draft driver.
+  copy of its draft driver. Checked against upstream master 6c7a87f (2026-09-28): `llama.h` now
+  has `llama_batch_ext` (mixed token and embedding batches) and `llama_process`, but
+  `common_speculative_process` still takes a plain `llama_batch`, so a pin update alone would not
+  lift this. Lifting it needs that API plus a CPU multimodal + MTP test.
 - **Video input is bounded sampled prefill.** It requires an mtmd vision projector, an mtmd build
   with video enabled, and FFmpeg/ffprobe. The default is 1 frame/s and 32 frames. Live video and
   soundtrack extraction are not supported. The Unix-only FFmpeg audio fallback is also absent on

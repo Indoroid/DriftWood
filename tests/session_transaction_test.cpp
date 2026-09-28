@@ -22,7 +22,7 @@ void check(bool ok, const char * name) {
 const char * k_template = R"({% for message in messages %}{{ message.role }}: {{ message.content }}
 {% endfor %}{% if add_generation_prompt %}assistant: {% endif %})";
 
-std::unique_ptr<meitte::Session> open_session(const char * model, float temp) {
+std::unique_ptr<meitte::Session> open_session(const char * model, float temp, bool ngram = false) {
     meitte::RunConfig cfg;
     cfg.model_path = model;
     cfg.n_ctx = 256;
@@ -30,6 +30,11 @@ std::unique_ptr<meitte::Session> open_session(const char * model, float temp) {
     cfg.chat_template = k_template;
     cfg.sampling.temp = temp;
     cfg.sampling.seed = 1234;
+    if (ngram) {
+        cfg.spec.source = meitte::DraftSource::ngram;
+        cfg.spec.draft_max = 3;
+        cfg.spec.ngram_min_match = 1;
+    }
     std::string error;
     auto session = meitte::Session::open(meitte::session_config_from(cfg), error);
     if (!session) std::fprintf(stderr, "open failed: %s\n", error.c_str());
@@ -131,6 +136,34 @@ int main(int argc, char ** argv) {
         meitte::testing::fail_next_kv_removals(0);
         check(r.ok && s->copy_logits() == edited_logits, "refused prefix trim falls back to a full rebuild");
         check(s->generate(turn("more", false)).ok, "conversation continues after the full rebuild");
+    }
+
+    // N-gram speculation: accepted groups, the trim back to what was emitted, and rollback must keep
+    // the conversation exact. A repetitive prompt makes the matcher draft.
+    {
+        const char * rep = "one two three one two three one two three one two";
+        std::string t1, t2;
+        std::vector<float> l2;
+        long long drafted = 0;
+        {
+            auto s = open_session(model, 0.0f, true);
+            auto r1 = s->generate(turn(rep, true, 10));
+            auto r2 = s->generate(turn(rep, false, 10));
+            check(r1.ok && r2.ok, "n-gram reference conversation");
+            drafted = r1.summary.mtp_drafted + r2.summary.mtp_drafted;
+            t1 = r1.generated_text;
+            t2 = r2.generated_text;
+            l2 = s->copy_logits();
+        }
+        std::printf("n-gram drafted %lld token(s) in the reference\n", drafted);
+        auto s = open_session(model, 0.0f, true);
+        auto r = s->generate(turn(rep, true, 10));
+        check(r.ok && r.generated_text == t1, "n-gram first turn is repeatable");
+        check(cancelled_turn(*s, turn(rep, false, 10)), "n-gram turn cancels");
+        r = s->generate(turn(rep, false, 10));
+        check(r.ok && r.generated_text == t2 && s->copy_logits() == l2, "n-gram retry matches the uninterrupted turn");
+        r = s->generate(turn(rep, true, 10));
+        check(r.ok && r.generated_text == t1, "n-gram session resets on a new chat");
     }
 
     // Perplexity ends the conversation (PplRequest): a continued turn afterwards is a first turn, not

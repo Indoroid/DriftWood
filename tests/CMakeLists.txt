@@ -82,15 +82,18 @@ if(BMOE_TEST_MM_MODEL AND BMOE_TEST_MMPROJ AND BMOE_TEST_MEDIA)
                      ${BMOE_TEST_MEDIA} ${BMOE_TEST_MM_STREAM})
 endif()
 
-add_executable(bmoe_session_protocol_test session_protocol_test.cpp)
-target_link_libraries(bmoe_session_protocol_test PRIVATE bmoe_cli_protocol)
-add_test(NAME session_protocol COMMAND bmoe_session_protocol_test)
+# Host tests: the frontends' protocols. They exist only when the frontends are built.
+if(BMOE_BUILD_CLI)
+    add_executable(bmoe_session_protocol_test session_protocol_test.cpp)
+    target_link_libraries(bmoe_session_protocol_test PRIVATE bmoe_cli_protocol)
+    add_test(NAME session_protocol COMMAND bmoe_session_protocol_test)
+endif()
 
 add_executable(bmoe_ngram_test ngram_test.cpp)
 target_link_libraries(bmoe_ngram_test PRIVATE bmoe_core)
 add_test(NAME ngram_draft COMMAND bmoe_ngram_test)
 
-if(UNIX)
+if(UNIX AND BMOE_BUILD_CLI)
     add_executable(bmoe_server_api_test server_api_test.cpp)
     target_link_libraries(bmoe_server_api_test PRIVATE bmoe_core)
     add_test(NAME server_api COMMAND bmoe_server_api_test)
@@ -116,8 +119,10 @@ if(PYTHON3)
         add_test(NAME ctypes_smoke
                  COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/examples/python/ctypes_smoke.py $<TARGET_FILE:bmoe_core>)
     endif()
-    add_test(NAME server_cli_parity
-             COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/scripts/check-server-cli-parity.py)
+    if(BMOE_BUILD_CLI)
+        add_test(NAME server_cli_parity
+                 COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/scripts/check-server-cli-parity.py)
+    endif()
 
     set(_gguf_py "${CMAKE_SOURCE_DIR}/third_party/llama.cpp/gguf-py")
     execute_process(
