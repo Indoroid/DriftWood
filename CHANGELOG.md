@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Refuse a second expert-overlap session while another owns the process-wide ggml-cpu expert-ready
+  hook. The second session used to take the hook over, so the first session's compute stopped
+  waiting for its own expert reads. Dense overlap already had this guard.
 - C ABI: add `meitte_config_init()` and `meitte_request_init()`, which fill defaults without writing
   past the caller's struct size. Fix a padding hazard: the `meitte_config` layout before the dense
   fields ended in tail padding that `dense_stream` now occupies, so callers compiled against it had

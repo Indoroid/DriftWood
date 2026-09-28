@@ -30,9 +30,10 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
 - **Dense mode does not use an MTP draft context.** The trunk capture does not classify the
   separate next-token prediction graph or guarantee its matrix lifetimes; `--mtp` therefore fails
   at open with a clear error. N-gram drafting has no separate graph.
-- **Dense overlap is limited to one active session per process.** The synced CPU weight-ready hook
-  has one process-wide callback and user pointer. A second overlap session fails at open; serial
-  dense sessions remain available. A per-context callback upstream would remove this limit.
+- **Overlap is limited to one active session per process, per hook.** The synced CPU expert-ready
+  and weight-ready hooks each have one process-wide callback and user pointer. A second expert
+  overlap session, or a second dense overlap session, fails at open; serial sessions remain
+  available beside it. A per-context callback upstream would remove this limit.
 - **Dense window and auto budget are conservative.** A two-adjacent-layer window is required by
   one-layer lookahead, and initialization reports the minimum when the configured window is too
   small. The automatic fixed set reserves 7 GiB plus the I/O window from `MemAvailable`; actual

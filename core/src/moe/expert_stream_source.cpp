@@ -1356,10 +1356,21 @@ void ExpertStreamSource::on_expert_ready(const ggml_tensor * src0, int expert) {
     stall_union_.exit();
 }
 
-void ExpertStreamSource::enable_overlap_hook() {
+namespace {
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
+std::atomic<ExpertStreamSource *> overlap_hook_owner{nullptr};
+#endif
+} // namespace
+
+bool ExpertStreamSource::enable_overlap_hook() {
+#ifdef BMOE_HAVE_EXPERT_READY_HOOK
+    ExpertStreamSource * expected = nullptr;
+    if (!overlap_hook_owner.compare_exchange_strong(expected, this, std::memory_order_acq_rel)) return false;
     ggml_cpu_set_expert_ready_hook(&ExpertStreamSource::c_expert_ready, this);
     hook_registered_ = true;
+    return true;
+#else
+    return false;
 #endif
 }
 
@@ -1403,6 +1414,7 @@ void ExpertStreamSource::shutdown() {
     if (hook_registered_) {
         ggml_cpu_set_expert_ready_hook(nullptr, nullptr);
         hook_registered_ = false;
+        overlap_hook_owner.store(nullptr, std::memory_order_release);
     }
 #endif
     // Wake any straggler blocked on a readiness flag so it observes fatal_ and unwinds.

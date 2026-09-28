@@ -100,10 +100,12 @@ public:
     uint64_t expert_bytes(int il) const override;
     Stats stats() const override;
 
-    // Register the process-global expert-ready hook so the CPU matmul blocks per expert
-    // until its slice is resident. Only meaningful in overlap mode; a no-op if the fork
-    // hook was not compiled in. Paired with shutdown(), which unregisters it.
-    void enable_overlap_hook();
+    // Register the process-global expert-ready hook so the CPU matmul blocks per expert until its
+    // slice is resident. Only meaningful in overlap mode. Paired with shutdown(), which unregisters it.
+    // The hook is one global in ggml-cpu, so a second source would silently take it over and the first
+    // session's compute would read experts before they are loaded. Returns false while another source
+    // owns it, and when the fork hook was not compiled in.
+    bool enable_overlap_hook();
 
     // True once an async read has failed or the source is shutting down. Wired to
     // llama_set_abort_callback so a mid-decode I/O failure aborts the graph cleanly

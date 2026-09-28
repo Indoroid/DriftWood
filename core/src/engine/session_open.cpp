@@ -620,7 +620,8 @@ bool Session::Impl::bind_expert_stream(const MoeRecipe & recipe,
 
     if (cfg.moe.overlap) {
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
-        source.enable_overlap_hook();
+        if (!source.enable_overlap_hook())
+            return fail(error, "only one expert overlap session can use the process-wide CPU hook at a time");
 #else
         return fail(error, "--overlap requires the bmoe llama.cpp fork (expert-ready hook not compiled in)");
 #endif
@@ -824,7 +825,10 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     Impl & im = *self->impl_;
     im.cfg = cfg;
 
-    // llama_backend_init/free is process-global and reference counted; init here, free in ~Impl.
+    // llama_backend_init/free are process-global and NOT reference counted. In the pinned llama.cpp
+    // init is idempotent (time and f16 tables, backend registry) and free only releases the
+    // quantization tables that ggml_quantize_chunk rebuilds on demand, so one session's teardown
+    // does not disturb another (tests/multi_session_test.cpp). Re-check both on a submodule bump.
     llama_backend_init();
     im.backend_inited = true;
 
