@@ -3,10 +3,12 @@
 // policy off and speculation off, none of this code runs.
 #include "session_impl.h"
 #include "llama_glue.h"
+#include "session_testing.h"
 
 #include "common.h"
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
 
 namespace meitte {
@@ -66,7 +68,61 @@ common_speculative * create_mtp_driver(const SpecConfig & spec, llama_context * 
     return common_speculative_init(sp, /*n_seq*/ 1);
 }
 
+namespace {
+std::atomic<int> forced_kv_removal_failures{0};
+} // namespace
+
+bool kv_remove_tail(llama_context * ctx, llama_pos keep) {
+    // Nothing at or past `keep`: there is nothing to remove, so no memory can refuse it.
+    if (llama_memory_seq_pos_max(llama_get_memory(ctx), 0) < keep) return true;
+    for (int n = forced_kv_removal_failures.load(std::memory_order_relaxed); n > 0;)
+        if (forced_kv_removal_failures.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return false;
+    return llama_memory_seq_rm(llama_get_memory(ctx), /*seq*/ 0, keep, -1);
+}
+
 } // namespace detail
+
+void testing::fail_next_kv_removals(int count) {
+    detail::forced_kv_removal_failures.store(count > 0 ? count : 0, std::memory_order_relaxed);
+}
+
+int testing::pending_kv_removal_failures() {
+    return detail::forced_kv_removal_failures.load(std::memory_order_relaxed);
+}
+
+bool Session::Impl::truncate_kv(llama_pos keep_pos, size_t keep_tokens) {
+    bool kept = detail::kv_remove_tail(ctx.get(), keep_pos);
+    // The draft context mirrors the target's positions. A draft that cannot follow would make the
+    // next draft decode start at a position it does not hold, so it forces the full reset too.
+    if (kept && ctx_dft) kept = detail::kv_remove_tail(ctx_dft.get(), keep_pos);
+    if (kept) {
+        kv_tokens.resize(std::min(keep_tokens, kv_tokens.size()));
+        kv_last_generation_start = std::min(kv_last_generation_start, kv_tokens.size());
+        return true;
+    }
+    llama_memory_clear(llama_get_memory(ctx.get()), true);
+    if (ctx_dft) llama_memory_clear(llama_get_memory(ctx_dft.get()), true);
+    kv_tokens.clear();
+    kv_n_past = 0;
+    kv_last_generation_start = 0;
+    return false;
+}
+
+void Session::Impl::reset_conversation() {
+    llama_memory_clear(llama_get_memory(ctx.get()), true);
+    // The draft context tracks the target's positions and must be dropped with it, or the first
+    // draft of the new conversation is conditioned on the previous one.
+    if (ctx_dft) llama_memory_clear(llama_get_memory(ctx_dft.get()), true);
+    chat_history.clear();
+    kv_tokens.clear();
+    kv_has_media = false;
+    retained_media.clear();
+    kv_n_past = 0;
+    kv_last_generation_start = 0;
+    // A new chat resets the sampler RNG, so a fixed seed reproduces the same transcript from a
+    // fresh conversation.
+    if (smpl) llama_sampler_reset(smpl);
+}
 
 int Session::Impl::grown_context_size(int64_t need) const {
     return (int) std::min<int64_t>(cfg.context.max_ctx, std::max<int64_t>(need, 2ll * cfg.n_ctx));

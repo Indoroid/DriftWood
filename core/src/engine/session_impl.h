@@ -53,6 +53,11 @@ create_mtp_context(llama_model * model, const llama_context_params & target, con
 // Create llama.cpp's speculative driver over a target/draft context pair. Returns nullptr on failure.
 common_speculative * create_mtp_driver(const SpecConfig & spec, llama_context * target, llama_context * draft);
 
+// Remove positions [keep, end) of sequence 0. False when the memory cannot keep that prefix — the
+// recurrent and hybrid caches refuse a partial removal without a snapshot — and then the memory is
+// unchanged. Every partial KV removal of the session goes through here (see session_testing.h).
+bool kv_remove_tail(llama_context * ctx, llama_pos keep);
+
 } // namespace detail
 
 // All native state lives here, behind the pimpl. Built once by Session::open(); every
@@ -183,6 +188,16 @@ struct Session::Impl {
     bool resize_context(int size, std::string & error);
     // The context size a growth step targets: at least `need`, at least double, at most max_ctx.
     int grown_context_size(int64_t need) const;
+
+    // Keep target KV positions [0, keep_pos) and the first `keep_tokens` of kv_tokens, and move the
+    // draft context to the same position. The physical KV and its logical records must never
+    // disagree: when either context cannot keep the prefix, both are cleared together with
+    // kv_tokens, kv_n_past and kv_last_generation_start. The next turn then rebuilds the conversation
+    // from chat_history (and from retained_media for a media transcript, as after a context resize).
+    // Returns false in that case.
+    bool truncate_kv(llama_pos keep_pos, size_t keep_tokens);
+    // Drop the KV, the conversation and the retained media: the state of a new chat.
+    void reset_conversation();
 
     // Session::open() phases, in call order (session_open.cpp). Each returns false and sets `error`
     // on failure; the caller then destroys the Impl, which tears down whatever the phase built.

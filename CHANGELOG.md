@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- Fix Session rollback when the KV cache refuses a partial removal (recurrent/hybrid memory): the
+  KV was cleared while `kv_tokens` kept the old prefix, so the next turn decoded after a prefix the
+  context no longer held. KV truncation now goes through one path that clears the KV together with
+  its token records, media position and draft context, and the next turn rebuilds the conversation.
+- Roll back every failed turn after prefill starts, not only cancelled ones: decode, overlap I/O and
+  MTP failures used to leave the partial prefill in the KV and the user message in the history.
+- Trim a speculative turn's recorded media position to the emitted end, matching the trimmed KV.
+- Make `GenerateRequest::override_sampling` request-local. The override used to replace the
+  session sampler for every later request.
+- Restore the session sampler's RNG when a turn rolls back, so a retried turn samples as if the
+  failed one had not run.
 - Split the engine session into focused units behind one shared `Session::Impl`
   (`session_open`, `session_generate`, `session_perplexity`, `session_context`), with the
   llama.h adapters in `llama_glue`, chat request rendering in `chat_render`, and per-phase

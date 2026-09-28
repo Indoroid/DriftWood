@@ -57,6 +57,9 @@ target_link_libraries(bmoe_library_c_test PRIVATE bmoe_core)
 add_test(NAME library_c_api COMMAND bmoe_library_c_test)
 add_executable(bmoe_context_test context_test.cpp)
 target_link_libraries(bmoe_context_test PRIVATE bmoe_core)
+add_executable(bmoe_session_transaction_test session_transaction_test.cpp)
+target_link_libraries(bmoe_session_transaction_test PRIVATE bmoe_core)
+target_include_directories(bmoe_session_transaction_test PRIVATE ${CMAKE_SOURCE_DIR}/core/src/engine)
 
 set(BMOE_TEST_MM_MODEL "" CACHE FILEPATH "Optional multimodal text model for the media trace fixture")
 set(BMOE_TEST_MMPROJ "" CACHE FILEPATH "Optional projector for the media trace fixture")
@@ -143,6 +146,8 @@ if(PYTHON3)
             set_tests_properties(moe_gates_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
             add_test(NAME context_${spec} COMMAND bmoe_context_test ${_model})
             set_tests_properties(context_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
+            add_test(NAME session_transaction_${spec} COMMAND bmoe_session_transaction_test ${_model})
+            set_tests_properties(session_transaction_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
         endforeach()
 
         add_test(

@@ -61,30 +61,21 @@ RunResult Session::generate(const GenerateRequest & req,
 
     // clear_kv = "new chat": drop the KV and the engine-held conversation. Otherwise this turn
     // continues the conversation, reusing the KV prefix already decoded from earlier turns.
-    if (req.clear_kv) {
-        llama_memory_clear(llama_get_memory(ctx), true);
-        // The draft context tracks the target's positions and must be dropped with it, or the first
-        // draft of the new conversation is conditioned on the previous one.
-        if (im.ctx_dft) llama_memory_clear(llama_get_memory(im.ctx_dft.get()), true);
-        im.chat_history.clear();
-        im.kv_tokens.clear();
-        im.kv_has_media = false;
-        im.retained_media.clear();
-        im.kv_n_past = 0;
-        im.kv_last_generation_start = 0;
-        // A new chat resets the sampler RNG, so a fixed seed reproduces the same transcript from a
-        // fresh conversation. A continued turn (clear_kv=false) keeps the stream going, matching the
-        // KV it decodes against.
-        if (im.smpl) llama_sampler_reset(im.smpl);
-    }
+    // A continued turn (clear_kv=false) keeps the sampler stream going, matching the KV it decodes
+    // against; a new chat resets it (see reset_conversation).
+    if (req.clear_kv) im.reset_conversation();
 
-    // Sampling is normally fixed at open(), but an HTTP API needs request-scoped temperature and
-    // nucleus settings. Rebuilding this tiny chain does not touch model/context state or the expert
-    // cache. The server is deliberately single-request-at-a-time, so no concurrent sampler exists.
-    if (req.override_sampling) {
-        if (im.smpl) llama_sampler_free(im.smpl);
-        im.smpl = make_sampler_chain(req.sampling);
-    }
+    // Sampling is fixed at open(), but an HTTP API needs request-scoped temperature and nucleus
+    // settings. An override builds a sampler that lives for this request only: the session's own
+    // sampler is neither used nor advanced, so the next request without an override samples exactly
+    // as if this one had never overridden anything.
+    using SamplerPtr = std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)>;
+    SamplerPtr request_sampler(req.override_sampling ? make_sampler_chain(req.sampling) : nullptr, llama_sampler_free);
+    llama_sampler * const smpl = req.override_sampling ? request_sampler.get() : im.smpl;
+    // The session sampler's RNG is part of the turn transaction: a rolled-back turn restores it, so
+    // the next turn samples as if the failed one had never run.
+    SamplerPtr sampler_snapshot(!req.override_sampling && im.smpl ? llama_sampler_clone(im.smpl) : nullptr,
+                                llama_sampler_free);
 
     // Format the prompt. With chat on, render the model's OWN chat template (real Jinja) over the
     // WHOLE conversation so far, and set up reasoning parsing so a thinking model's internal
@@ -334,22 +325,17 @@ RunResult Session::generate(const GenerateRequest & req,
             while (n_common < im.kv_tokens.size() && n_common < max_common &&
                    im.kv_tokens[n_common] == tokens[n_common])
                 ++n_common;
-            if (n_common < im.kv_tokens.size()) {
-                // SWA-style memory (e.g. Gemma) can refuse a partial removal; fall back to a full
-                // re-prefill in that case rather than continuing from an inconsistent cache.
-                if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, (llama_pos) n_common, -1)) {
-                    llama_memory_clear(llama_get_memory(ctx), true);
-                    n_common = 0;
-                }
-                im.kv_tokens.resize(n_common);
-            }
-            // The draft context mirrors the target's positions, so it has to be rewound to the SAME
-            // point — including when n_common did not move, since the previous turn left it holding
+            // Drop the divergent tail. Recurrent and hybrid memory can refuse a partial removal; then
+            // truncate_kv clears the KV and its records, and the turn re-prefills in full rather than
+            // continuing from an inconsistent cache.
+            //
+            // The draft context mirrors the target's positions, so it is rewound to the SAME point —
+            // including when n_common did not move, since the previous turn left it holding
             // everything it generated. Miss this and the first prefill batch of the turn starts at a
             // position the draft context already has, which llama.cpp rejects outright: the second
             // message of a conversation fails while the first always works.
-            if (im.ctx_dft && !llama_memory_seq_rm(llama_get_memory(im.ctx_dft.get()), 0, (llama_pos) n_common, -1))
-                llama_memory_clear(llama_get_memory(im.ctx_dft.get()), true);
+            if ((n_common < im.kv_tokens.size() || im.ctx_dft) && !im.truncate_kv((llama_pos) n_common, n_common))
+                n_common = 0;
         }
     }
 
@@ -376,35 +362,41 @@ RunResult Session::generate(const GenerateRequest & req,
     }
 
     // Roll this turn back to the state before it started: drop the KV added this turn, forget the
-    // tokens we fed, and un-append the user message. Used on cancel so prior turns stay usable.
+    // tokens we fed, un-append the user message and restore the session sampler. Every failure after
+    // this point goes through here, so a cancelled or failed turn leaves prior turns usable.
     const size_t rollback_tokens = media_append_only ? im.kv_tokens.size() : n_common;
     const llama_pos rollback_n_past = media_kv_continuation ? media_reuse_n_past : (llama_pos) n_common;
     const size_t rollback_generation_start = im.kv_last_generation_start;
+    auto restore_sampler = [&]() {
+        if (!sampler_snapshot) return;
+        llama_sampler_free(im.smpl);
+        im.smpl = sampler_snapshot.release();
+    };
     auto rollback_turn = [&]() {
         if (chat_on) {
-            if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, rollback_n_past, -1))
-                llama_memory_clear(llama_get_memory(ctx), true);
-            im.kv_tokens.resize(rollback_tokens);
-            im.kv_last_generation_start = rollback_generation_start;
+            // The draft context follows the target to the same position (truncate_kv): a turn that
+            // left the two at different positions would fail the NEXT turn, not this one. When the
+            // prefix cannot be kept, the records are cleared with it and the next turn rebuilds.
+            if (im.truncate_kv(rollback_n_past, rollback_tokens)) {
+                im.kv_last_generation_start = rollback_generation_start;
+                if (media_kv_continuation) im.kv_n_past = rollback_n_past;
+            }
             rollback_history();
         } else {
             llama_memory_clear(llama_get_memory(ctx), true);
+            if (im.ctx_dft) llama_memory_clear(llama_get_memory(im.ctx_dft.get()), true);
         }
-        // Whatever the target rolled back to, the draft context follows: a cancelled turn that left
-        // the two at different positions would fail the NEXT turn, not this one.
         if (has_media) {
             im.kv_has_media = false;
             im.retained_media.clear();
             im.kv_n_past = 0;
             im.kv_last_generation_start = 0;
-        } else if (media_kv_continuation) {
-            im.kv_n_past = rollback_n_past;
         }
-        if (im.ctx_dft) {
-            const llama_pos keep = chat_on ? rollback_n_past : 0;
-            if (!llama_memory_seq_rm(llama_get_memory(im.ctx_dft.get()), 0, keep, -1))
-                llama_memory_clear(llama_get_memory(im.ctx_dft.get()), true);
-        }
+        restore_sampler();
+    };
+    auto abort_turn = [&](std::string msg) {
+        rollback_turn();
+        return fail(std::move(msg));
     };
 
     // ── prefill (chunked by n_batch; positions auto-continue from the reused prefix) ──
@@ -507,8 +499,9 @@ RunResult Session::generate(const GenerateRequest & req,
                     res.cancelled = true;
                     return res;
                 }
-                if (moe.overlap && im.source.fatal()) return fail("expert stream I/O failed during overlap prefill");
-                return fail("prefill decode failed");
+                if (moe.overlap && im.source.fatal())
+                    return abort_turn("expert stream I/O failed during overlap prefill");
+                return abort_turn("prefill decode failed");
             }
             if (im.cfg.dense_stream.enabled) {
                 pio::ProcessMemory pm;
@@ -517,7 +510,7 @@ RunResult Session::generate(const GenerateRequest & req,
             }
             im.trace_flush();
             if (mtp_on && !common_speculative_process(im.mtp.get(), pf))
-                return fail("MTP draft context failed to process the prefill batch");
+                return abort_turn("MTP draft context failed to process the prefill batch");
         }
         if (chat_on)
             for (int i = (int) n_common; i < n_prompt; ++i)
@@ -602,7 +595,7 @@ RunResult Session::generate(const GenerateRequest & req,
     // last-position logits, which llama_sampler_sample reads at index -1 — the same logits argmax
     // would have read.
     llama_token tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler.get(), ctx, -1)
-                      : im.smpl         ? llama_sampler_sample(im.smpl, ctx, -1)
+                      : smpl            ? llama_sampler_sample(smpl, ctx, -1)
                                         : argmax(logits, im.n_vocab);
 
     while (n_gen < req.n_predict) {
@@ -703,8 +696,8 @@ RunResult Session::generate(const GenerateRequest & req,
                 // collides with the first (llama.cpp requires a batch to begin strictly after the
                 // last stored position). The catch-up is what replaces those rows with ones
                 // conditioned on the target's own hidden states instead of the head's guesses.
-                if (!llama_memory_seq_rm(llama_get_memory(im.ctx_dft.get()), /*seq*/ 0, n_past, -1))
-                    return fail("the MTP draft context does not support rewinding its KV cache");
+                if (!kv_remove_tail(im.ctx_dft.get(), n_past))
+                    return abort_turn("the MTP draft context does not support rewinding its KV cache");
             } else {
                 // The n-gram source reads the text and nothing else: no draft context, no decode, no
                 // expert read, so the bytes bracketed around this arm are zero by construction. When
@@ -761,11 +754,11 @@ RunResult Session::generate(const GenerateRequest & req,
                 res.cancelled = true;
                 break;
             }
-            if (moe.overlap && im.source.fatal()) return fail("expert stream I/O failed during overlap decode");
-            return fail("decode failed during generation");
+            if (moe.overlap && im.source.fatal()) return abort_turn("expert stream I/O failed during overlap decode");
+            return abort_turn("decode failed during generation");
         }
         if (!spec_on && mtp_on && !common_speculative_process(im.mtp.get(), step))
-            return fail("MTP draft context failed to process the budgeted decode");
+            return abort_turn("MTP draft context failed to process the budgeted decode");
         im.trace_flush(); // outside the s0..s1 bracket: the trace's own writes must not bill wall_ms
         ++im.spec_totals.decodes;
 
@@ -814,7 +807,7 @@ RunResult Session::generate(const GenerateRequest & req,
                 const uint64_t pb0 = moe.enabled ? im.source.stats().read_bytes : 0;
                 batch_fill(im.mtp_batch, verify_toks.data(), 1 + n_acc, n_past, /*all_logits*/ false);
                 if (!common_speculative_process(im.mtp.get(), im.mtp_batch))
-                    return fail("MTP draft context failed to process the verify batch");
+                    return abort_turn("MTP draft context failed to process the verify batch");
                 draft_s += secs(p0, Clock::now());
                 if (moe.enabled) im.spec_totals.draft_read_bytes += im.source.stats().read_bytes - pb0;
             }
@@ -825,8 +818,8 @@ RunResult Session::generate(const GenerateRequest & req,
             // needs no rollback of its own — it was never given the tail.
             if (n_acc < n_draft) {
                 const llama_pos keep = n_past + 1 + n_acc;
-                if (!llama_memory_seq_rm(llama_get_memory(ctx), /*seq*/ 0, keep, -1))
-                    return fail("failed to roll back the rejected draft tokens from the KV cache");
+                if (!kv_remove_tail(ctx, keep))
+                    return abort_turn("failed to roll back the rejected draft tokens from the KV cache");
             }
             if (mtp_on) common_speculative_accept(im.mtp.get(), /*seq*/ 0, (uint16_t) n_acc);
         }
@@ -906,27 +899,22 @@ RunResult Session::generate(const GenerateRequest & req,
         const int32_t row = wide ? n_acc : -1;
         logits = llama_get_logits_ith(ctx, row);
         tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler.get(), ctx, row)
-              : im.smpl         ? llama_sampler_sample(im.smpl, ctx, row)
+              : smpl            ? llama_sampler_sample(smpl, ctx, row)
                                 : argmax(logits, im.n_vocab);
     }
 
     // Speculation can leave the KV ahead of what the caller received: an accepted end-of-generation
     // token is decoded but never emitted, and a group can be cut short by n_predict. The KV and
     // kv_tokens must agree exactly or the next turn's prefix reuse decodes from a state that never
-    // produced this answer, so trim back to what was actually emitted.
+    // produced this answer, so trim back to what was actually emitted. The draft context mirrors the
+    // target's positions (process() decodes the same batches into it), so truncate_kv trims it to the
+    // same point — not cleared, or a continued chat turn would feed it only the new suffix and draft
+    // from a state that never saw the conversation. If the trim is refused, nothing survives that we
+    // can still describe: truncate_kv clears the KV with its records and the next turn rebuilds.
+    llama_pos kv_end = n_past; // the physical end of this turn in the KV
     if (spec_on) {
         const llama_pos emitted_end = prompt_n_past + n_gen;
-        if (!llama_memory_seq_rm(llama_get_memory(ctx), 0, emitted_end, -1)) {
-            // Nothing survives that we can still describe, so say so rather than leave kv_tokens
-            // asserting a prefix the context no longer holds. The next turn re-prefills in full.
-            llama_memory_clear(llama_get_memory(ctx), true);
-            im.kv_tokens.clear();
-        }
-        // The draft context mirrors the target's positions (process() decodes the same batches into
-        // it), so it is trimmed to the same point — not cleared, or a continued chat turn would
-        // feed it only the new suffix and draft from a state that never saw the conversation.
-        if (mtp_on && !llama_memory_seq_rm(llama_get_memory(im.ctx_dft.get()), 0, emitted_end, -1))
-            llama_memory_clear(llama_get_memory(im.ctx_dft.get()), true);
+        kv_end = im.truncate_kv(emitted_end, im.kv_tokens.size()) ? emitted_end : 0;
     }
 
     // ── summary ──
@@ -940,7 +928,7 @@ RunResult Session::generate(const GenerateRequest & req,
     loop_overhead_s += secs(loop_mark, Clock::now());
     s.loop_overhead_s_per_token = n_gen ? loop_overhead_s / n_gen : 0.0;
     s.n_prompt = media_prefill ? n_prompt : n_prompt - (int) n_common;
-    s.n_past = chat_on && im.kv_has_media ? (int) n_past
+    s.n_past = chat_on && im.kv_has_media ? (int) kv_end
                : has_media                ? (int) (prompt_n_past + n_gen)
                : chat_on                  ? (int) im.kv_tokens.size()
                                           : n_prompt + n_gen;
@@ -1069,12 +1057,13 @@ RunResult Session::generate(const GenerateRequest & req,
         im.kv_has_media = prior_kv_has_media;
         if (!prior_kv_has_media) im.retained_media.clear();
         rollback_history();
+        restore_sampler();
     } else if (res.cancelled) {
         // Undo the whole turn (KV, fed tokens, and the pushed user message) so the conversation
         // is left exactly as it was before this prompt and stays continuable.
         rollback_turn();
     } else if (chat_on) {
-        if (im.kv_has_media) im.kv_n_past = n_past;
+        if (im.kv_has_media) im.kv_n_past = kv_end;
         // Commit the assistant turn to the running conversation. Parsing separates a thinking
         // model's reasoning from the answer; the next turn re-renders history from these messages.
         // Reuses the parse above. A prefilled turn has no turn header in the stream to parse — the

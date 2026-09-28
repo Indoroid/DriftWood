@@ -73,6 +73,10 @@ boundary via llama's abort callback (installed unconditionally at open, so it wo
 overlap alike). It leaves the model and cache intact; the returned `RunResult` has `cancelled =
 true`. In chat mode a cancel **rolls the turn back** to the reused prefix (dropping this turn's KV
 and un-appending the user message) so prior turns stay usable and the conversation can continue.
+A failed turn rolls back the same way, and so does the session sampler's RNG. When the KV cannot
+keep the reused prefix (recurrent or hybrid memory refuses a partial removal), the rollback clears
+the KV together with its token records and the next turn rebuilds the conversation from the
+transcript — the KV and the engine's record of it never disagree.
 Cancel is distinct from a fatal streaming error, which is sticky and ends the session.
 Dense streaming drains interrupted reads before the next turn, clears the active matrix
 window and keeps the fixed resident set; the next turn uses the same tensor addresses.

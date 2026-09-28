@@ -166,7 +166,9 @@ struct GenerateRequest {
     // llama.cpp parses each value before exposing it to the Jinja context.
     std::map<std::string, std::string> chat_template_kwargs;
     bool clear_kv = true;
-    // HTTP callers can override sampling per request without reopening the model. Ordinary callers
+    // HTTP callers can override sampling per request without reopening the model. The override lives
+    // for this request only: the SessionConfig sampler is neither used nor advanced, and the next
+    // request without an override samples exactly as if this one had not happened. Ordinary callers
     // leave this false and retain the SessionConfig sampling chain.
     bool override_sampling = false;
     SamplingConfig sampling;
