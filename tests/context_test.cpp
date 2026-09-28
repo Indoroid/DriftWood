@@ -43,6 +43,8 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "fixed request returned ok=%d, exhausted=%d, n_ctx=%d, error=%s\n", result.ok,
                      result.context_exhausted, session->n_ctx(), result.error.c_str());
     check(!result.ok && result.context_exhausted && session->n_ctx() == 32, "default overflow leaves capacity fixed");
+    check(result.finish == meitte::FinishReason::ContextFull && result.rejected && !result.fatal,
+          "overflow is a rejected request with a context_full finish");
     request.prompt = "a";
     result = session->generate(request);
     if (!result.ok) std::fprintf(stderr, "recovery request failed: %s\n", result.error.c_str());

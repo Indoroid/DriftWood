@@ -6,6 +6,24 @@
 
 namespace meitte {
 
+const char * finish_reason_name(FinishReason reason) {
+    switch (reason) {
+    case FinishReason::Stop:
+        return "stop";
+    case FinishReason::Length:
+        return "length";
+    case FinishReason::Cancelled:
+        return "cancelled";
+    case FinishReason::ContextFull:
+        return "context_full";
+    case FinishReason::Error:
+        return "error";
+    case FinishReason::None:
+        break;
+    }
+    return "none";
+}
+
 // n_ctx is passed through untouched so the gates run at exactly the context they specify.
 SessionConfig session_config_from(const RunConfig & cfg) {
     SessionConfig sc;

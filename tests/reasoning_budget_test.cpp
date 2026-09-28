@@ -67,6 +67,8 @@ int main(int argc, char ** argv) {
     check(ten.ok && ten.summary.n_reasoning == 10 + forced &&
               ten.summary.n_generated - ten.summary.n_reasoning == n_predict,
           "answer token limit holds after a longer span");
+    check(ten.finish == meitte::FinishReason::Length && ten.summary.n_generated > n_predict,
+          "finish is length although more than n_predict tokens were generated");
     // The reasoning/answer TEXT split is not checked here: the random model's answer bytes do not
     // match the template's output grammar, so the parser falls back to the raw stream by design.
 

@@ -39,9 +39,14 @@ RunResult Session::generate(const GenerateRequest & req,
     }
 
     RunResult res;
+    // Set once the turn starts to change the KV. A failure before it is a rejected request.
+    bool turn_started = false;
     auto fail = [&](std::string msg) {
         res.ok = false;
         res.error = std::move(msg);
+        res.finish = res.context_exhausted ? FinishReason::ContextFull : FinishReason::Error;
+        res.rejected = !turn_started;
+        res.fatal = im.hook->fatal() || im.source.fatal() || im.dense_stream.fatal();
         return res;
     };
     // Let interrupted dense reads stop before the next generation can reuse their addresses.
@@ -410,6 +415,7 @@ RunResult Session::generate(const GenerateRequest & req,
     // Prefill attribution (#173): the cumulative counters are pinned before the prompt chunks so
     // their deltas across prefill carry the same wall-additive terms the decode phase reports.
     // The session layer already holds everything needed; the streamer is untouched.
+    turn_started = true;
     PrefillTally prefill_tally;
     prefill_tally.begin(moe.enabled, im.source);
     const uint64_t prefill_faults0 = pio::major_faults();
@@ -469,6 +475,7 @@ RunResult Session::generate(const GenerateRequest & req,
             if (cancelled) {
                 res.ok = true;
                 res.cancelled = true;
+                res.finish = FinishReason::Cancelled;
                 return res;
             }
             if (moe.overlap && im.source.fatal()) return fail("expert stream I/O failed during multimodal prefill");
@@ -504,6 +511,7 @@ RunResult Session::generate(const GenerateRequest & req,
                     rollback_turn();
                     res.ok = true;
                     res.cancelled = true;
+                    res.finish = FinishReason::Cancelled;
                     return res;
                 }
                 if (moe.overlap && im.source.fatal())
@@ -609,8 +617,12 @@ RunResult Session::generate(const GenerateRequest & req,
                       : smpl            ? llama_sampler_sample(smpl, ctx, -1)
                                         : argmax(logits, im.n_vocab);
 
+    bool eog = false;
     while (n_charged < req.n_predict) {
-        if (llama_vocab_is_eog(im.vocab, tok)) break;
+        if (llama_vocab_is_eog(im.vocab, tok)) {
+            eog = true;
+            break;
+        }
         if (n_past + 1 >= im.cfg.n_ctx) {
             bool rebuilt = false;
             bool changed = false;
@@ -906,7 +918,10 @@ RunResult Session::generate(const GenerateRequest & req,
             if (sink) sink->on_token(m);
         }
 
-        if (eog_hit) break;
+        if (eog_hit) {
+            eog = true;
+            break;
+        }
         // The accepted group is now KV-resident, and the logits at the first unverified position
         // hold the target's own continuation — the next token, arrived at for free. Off the
         // speculative path the row index stays -1, exactly as before: one token, one row.
@@ -931,6 +946,11 @@ RunResult Session::generate(const GenerateRequest & req,
         const llama_pos emitted_end = prompt_n_past + n_gen;
         kv_end = im.truncate_kv(emitted_end, im.kv_tokens.size()) ? emitted_end : 0;
     }
+
+    res.finish = res.context_exhausted ? FinishReason::ContextFull
+                 : res.cancelled       ? FinishReason::Cancelled
+                 : eog                 ? FinishReason::Stop
+                                       : FinishReason::Length;
 
     // ── summary ──
     RunSummary & s = res.summary;

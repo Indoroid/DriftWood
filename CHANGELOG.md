@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Report the turn outcome from the engine: `RunResult::finish` (stop, length, cancelled,
+  context_full, error), `rejected` (refused before any state changed) and `fatal` (the session can
+  no longer generate). Frontends previously inferred these from error text and token counts.
 - Build: `BMOE_BUILD_TESTS` no longer pulls in `cli/`. Core tests build against `libmeitte` alone
   with `BMOE_BUILD_CLI=OFF`; the CLI protocol, server API and CLI/server parity tests are host tests
   added only with `BMOE_BUILD_CLI=ON`.

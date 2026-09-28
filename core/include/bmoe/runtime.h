@@ -29,10 +29,31 @@ struct ToolCall {
     std::string arguments;
 };
 
+// Why a generation ended. Decided by the engine, which is the only place that knows: a frontend
+// that compares token counts cannot tell a reasoning allowance, a cancel or a full context apart.
+enum class FinishReason {
+    None,        // no generation ran
+    Stop,        // the model emitted end-of-generation
+    Length,      // the n_predict answer allowance ran out
+    Cancelled,   // Session::cancel() interrupted it
+    ContextFull, // the context reached capacity (context_exhausted is set too)
+    Error,       // it failed; see error, rejected and fatal
+};
+
+// Stable lowercase name ("stop", "length", "cancelled", "context_full", "error", "none").
+const char * finish_reason_name(FinishReason reason);
+
 struct RunResult {
     bool ok = false;
     bool cancelled = false; // generation was interrupted by Session::cancel() (ok stays true)
     bool context_exhausted = false;
+    FinishReason finish = FinishReason::None;
+    // The request failed before it changed any conversation state (validation, template, capacity
+    // preflight): the caller's input is at fault, and the same session serves the next request.
+    bool rejected = false;
+    // The failure left the session unable to generate again (a fatal streaming I/O error). Every
+    // other failure rolls the turn back and leaves the session usable; see docs/session.md.
+    bool fatal = false;
     std::vector<std::string> context_events;
     std::string error;
     std::string generated_text;

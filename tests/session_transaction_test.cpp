@@ -53,7 +53,7 @@ meitte::GenerateRequest turn(const char * prompt, bool clear_kv, int n_predict =
 // Generate, cancelling after the first token. The turn must report cancellation and roll back.
 bool cancelled_turn(meitte::Session & s, const meitte::GenerateRequest & req) {
     auto r = s.generate(req, [&](const meitte::TokenMetrics &) { s.cancel(); });
-    return r.ok && r.cancelled;
+    return r.ok && r.cancelled && r.finish == meitte::FinishReason::Cancelled && !r.rejected && !r.fatal;
 }
 
 } // namespace
@@ -164,6 +164,21 @@ int main(int argc, char ** argv) {
         check(r.ok && r.generated_text == t2 && s->copy_logits() == l2, "n-gram retry matches the uninterrupted turn");
         r = s->generate(turn(rep, true, 10));
         check(r.ok && r.generated_text == t1, "n-gram session resets on a new chat");
+    }
+
+    // Turn outcome: the engine says why a turn ended and whether the session survives a failure.
+    {
+        auto s = open_session(model, 0.0f);
+        auto r = s->generate(turn("hello there", true));
+        const bool length = r.summary.n_generated == 6;
+        check(r.ok && r.finish == (length ? meitte::FinishReason::Length : meitte::FinishReason::Stop),
+              "finish reason of a completed turn");
+        meitte::GenerateRequest bad = turn("and then", false);
+        bad.chat_template_kwargs[""] = "true";
+        r = s->generate(bad);
+        check(!r.ok && r.rejected && !r.fatal && r.finish == meitte::FinishReason::Error,
+              "invalid request is rejected, not fatal");
+        check(s->generate(turn("and then", false)).ok, "session serves the next request after a rejection");
     }
 
     // Perplexity ends the conversation (PplRequest): a continued turn afterwards is a first turn, not
