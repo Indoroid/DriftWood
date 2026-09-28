@@ -164,11 +164,25 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   `llama_state_seq_get_data_ext`/`llama_state_seq_set_data_ext` with
   `LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY` (one recurrent state per checkpoint, sizes as above), or an
   upstream `llama_memory_seq_rm` that refuses a snapshot rollback deeper than the last ubatch.
-- **Hybrid and recurrent models re-prefill every continued turn.** Prefix reuse trims the KV back to
-  the common prefix, and recurrent state cannot drop a partial tail, so on such models (qwen35moe
-  among them) the trim is refused, the KV is cleared with its records, and the whole transcript is
-  prefilled again. The output is exact (verified with cancel and retry on Qwen3.6-35B-A3B); the
-  cost is prefill time per turn.
+- **A continued turn re-prefills the whole transcript when the chat template rewrites an earlier
+  assistant turn on a hybrid or recurrent model.** Trigger: a continued chat turn (`--kv-preserve`,
+  or `clear_kv=false`) on a model with recurrent state whose template renders a previous assistant
+  turn differently from the tokens decoded for it. Cause: Qwen3.6-35B-A3B's template drops the
+  reasoning block of assistant turns before the last user message unless `preserve_thinking` is
+  set. With thinking off, the generation prompt ends in an empty `<think>` block, so the next
+  render diverges right after the previous assistant header. Prefix reuse must then remove the
+  cached tail after that point, recurrent state refuses it (see the rollback entry above), and the
+  turn prefills the whole transcript. Evidence (`--no-think`, three turns): the common prefix is 19
+  of 26 cached tokens on turn 2 and 37 of 42 on turn 3, so the turns prefill 41 and 64 tokens.
+  Qwen3.8-27B's template keeps the block by default: the common prefix is the whole cache (33 of
+  33, 54 of 54) and the turns prefill only the new 19 and 26 tokens. The rendered prompts and the
+  output are correct; the cost is prefill time, which grows with the transcript. The engine does not
+  keep the decoded history against the template, because the model would then continue from a
+  history the template does not produce, and it applies no model-specific rule. Workaround:
+  `--reasoning-preserve` (or `chat_template_kwargs: {"preserve_reasoning": true}`) makes that
+  template keep the block; turns 2 and 3 then prefill 19 and 26 tokens. With thinking on, it also
+  keeps the earlier reasoning in the context. Possible remedy: the partial-state checkpoint above,
+  taken where the previous assistant turn starts.
 - **Raw-mode KV continuation is physical only.** With the chat template off, `clear_kv=false`
   decodes the new prompt after whatever the KV holds (llama.cpp infers the positions), but the
   turn's position bookkeeping starts at 0: `RunSummary::n_past`, the context-capacity check and

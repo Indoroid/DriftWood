@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Docs: `docs/limitations.md` replaces "hybrid models re-prefill every continued turn" with the
+  measured cause. Qwen3.6-35B-A3B's template drops the empty reasoning block from earlier assistant
+  turns, so the common prefix ends inside the cache and recurrent state cannot drop the tail;
+  Qwen3.8-27B's template keeps it and reuses the prefix. `--reasoning-preserve` avoids the full
+  re-prefill on the former. No engine change.
 - Fix continued chat turns and rollbacks on recurrent and hybrid models with speculation on
   (`--mtp`, `--ngram`) decoding from the recurrent state of a different position. Speculation
   creates the context with `n_rs_seq = draft_max` snapshots, which cover the last decoded ubatch
