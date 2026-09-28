@@ -41,6 +41,10 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+// windows.h otherwise defines min and max macros, which break std::numeric_limits<T>::max().
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 

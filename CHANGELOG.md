@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Build: `meitte-cli` compiles on Windows again. `cli/main.cpp` includes `windows.h`, whose `min`
+  and `max` macros broke `std::numeric_limits<int>::max()` in the context env parsing (MSVC C2589);
+  it now defines `NOMINMAX` first, as `core/src/io/mapping_release.cpp` does.
 - Docs: `docs/limitations.md` replaces "hybrid models re-prefill every continued turn" with the
   measured cause. Qwen3.6-35B-A3B's template drops the empty reasoning block from earlier assistant
   turns, so the common prefix ends inside the cache and recurrent state cannot drop the tail;
