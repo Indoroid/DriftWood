@@ -470,8 +470,9 @@ struct RunConfig {
     // Only meaningful with chatml; the raw-prompt path ignores it.
     bool think = true;
     std::string reasoning_effort;
-    // -1 leaves reasoning unlimited. A non-negative value caps the template's reasoning span
-    // without reducing n_predict, matching llama.cpp's --reasoning-budget semantics.
+    // -1 leaves reasoning unlimited. A non-negative value caps the template's reasoning span with
+    // llama.cpp's reasoning-budget sampler; reasoning within the cap does not consume n_predict.
+    // See GenerateRequest::reasoning_budget_tokens.
     int reasoning_budget_tokens = -1;
     // Unset leaves the model template's policy intact. Set values are passed as the Jinja
     // preserve_reasoning kwarg for templates that support retaining thought in history.

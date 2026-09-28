@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Make reasoning-token accounting match the documented contract: with a reasoning budget, tokens in
+  the reasoning span (up to the budget plus the forced end sequence) no longer consume `n_predict`,
+  which previously counted every token. Without a budget, `n_predict` still bounds the whole
+  generation. `RunSummary::n_reasoning` reports the split; `TokenMetrics::steps` includes the
+  allowance. The span is observed with llama.cpp's own reasoning-budget state machine.
 - Fix Session rollback when the KV cache refuses a partial removal (recurrent/hybrid memory): the
   KV was cleared while `kv_tokens` kept the old prefix, so the next turn decoded after a prefix the
   context no longer held. KV truncation now goes through one path that clears the KV together with

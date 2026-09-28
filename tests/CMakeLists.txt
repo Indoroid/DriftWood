@@ -60,6 +60,9 @@ target_link_libraries(bmoe_context_test PRIVATE bmoe_core)
 add_executable(bmoe_session_transaction_test session_transaction_test.cpp)
 target_link_libraries(bmoe_session_transaction_test PRIVATE bmoe_core)
 target_include_directories(bmoe_session_transaction_test PRIVATE ${CMAKE_SOURCE_DIR}/core/src/engine)
+add_executable(bmoe_reasoning_budget_test reasoning_budget_test.cpp)
+target_link_libraries(bmoe_reasoning_budget_test PRIVATE bmoe_core)
+target_compile_definitions(bmoe_reasoning_budget_test PRIVATE BMOE_TMPL_QWEN3="${_tmpl_dir}/Qwen3.5-4B.jinja")
 
 set(BMOE_TEST_MM_MODEL "" CACHE FILEPATH "Optional multimodal text model for the media trace fixture")
 set(BMOE_TEST_MMPROJ "" CACHE FILEPATH "Optional projector for the media trace fixture")
@@ -148,6 +151,8 @@ if(PYTHON3)
             set_tests_properties(context_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
             add_test(NAME session_transaction_${spec} COMMAND bmoe_session_transaction_test ${_model})
             set_tests_properties(session_transaction_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
+            add_test(NAME reasoning_budget_${spec} COMMAND bmoe_reasoning_budget_test ${_model})
+            set_tests_properties(reasoning_budget_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
         endforeach()
 
         add_test(

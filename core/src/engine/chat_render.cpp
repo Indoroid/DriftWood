@@ -1,7 +1,10 @@
 #include "chat_render.h"
 
 #include "common.h"
+#include "reasoning-budget.h"
 #include <nlohmann/json.hpp>
+
+#include <cstdint>
 
 namespace meitte::detail {
 
@@ -163,12 +166,12 @@ bool oldest_complete_turn(const std::vector<common_chat_msg> & history,
     return true;
 }
 
-common_sampler * make_reasoning_budget_sampler(const llama_model * model,
-                                               const llama_vocab * vocab,
-                                               const SamplingConfig & sampling,
-                                               int budget_tokens,
-                                               const common_chat_params & chat_params,
-                                               const std::string & prompt) {
+bool ReasoningBudget::init(const llama_model * model,
+                           const llama_vocab * vocab,
+                           const SamplingConfig & sampling,
+                           int budget_tokens,
+                           const common_chat_params & chat_params,
+                           const std::string & prompt) {
     common_params_sampling params;
     params.seed = sampling.seed;
     params.top_k = sampling.top_k;
@@ -194,11 +197,29 @@ common_sampler * make_reasoning_budget_sampler(const llama_model * model,
     for (const std::string & tag : chat_params.thinking_end_tags)
         params.reasoning_budget_end.push_back(common_tokenize(vocab, tag, false, true));
     params.reasoning_budget_forced = params.reasoning_budget_end.front();
-    common_sampler * sampler = common_sampler_init(model, params);
-    if (sampler && thinking_prefilled)
-        for (const llama_token token : params.reasoning_budget_start)
-            common_sampler_accept(sampler, token, /*is_generated*/ true);
-    return sampler;
+    sampler_.reset(common_sampler_init(model, params));
+    observer_.reset(common_reasoning_budget_init(vocab, {params.reasoning_budget_start}, params.reasoning_budget_end,
+                                                 params.reasoning_budget_forced, INT32_MAX));
+    if (!sampler_ || !observer_) return false;
+    if (thinking_prefilled)
+        for (const llama_token token : params.reasoning_budget_start) {
+            common_sampler_accept(sampler_.get(), token, /*is_generated*/ true);
+            llama_sampler_accept(observer_.get(), token);
+        }
+    allowance_ = budget_tokens + (int) params.reasoning_budget_forced.size();
+    return true;
+}
+
+bool ReasoningBudget::accept(llama_token token) {
+    auto in_span = [](common_reasoning_budget_state s) {
+        return s == REASONING_BUDGET_COUNTING || s == REASONING_BUDGET_WAITING_UTF8 || s == REASONING_BUDGET_FORCING;
+    };
+    const bool before = in_span(common_reasoning_budget_get_state(observer_.get()));
+    llama_sampler_accept(observer_.get(), token);
+    const bool after = in_span(common_reasoning_budget_get_state(observer_.get()));
+    common_sampler_accept(sampler_.get(), token, /*is_generated*/ true);
+    // A token that closes the span was inside before it; one that opens the span is inside after.
+    return before || after;
 }
 
 } // namespace meitte::detail

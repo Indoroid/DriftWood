@@ -136,7 +136,9 @@ stdout — see [telemetry.md](telemetry.md)). A generate request may send either
 or a complete `messages` transcript, plus `think`, `reasoning_effort`, and JSON-valued
 `chat_template_kwargs`; these request controls do not reopen the session. `--reasoning-budget N`
 limits only the template's reasoning span (`0` closes it at once), not the final-answer
-`n_predict` allowance. `--reasoning-preserve` and `--no-reasoning-preserve` pass the model
+`n_predict` allowance: reasoning tokens up to `N` plus the forced end sequence are not charged to
+`n_predict`, so a turn generates at most `n_predict + N + len(end sequence)` tokens. Without a
+budget (`-1`), `n_predict` counts every generated token, reasoning included. `--reasoning-preserve` and `--no-reasoning-preserve` pass the model
 template's `preserve_reasoning` setting when it supports that policy. The server also accepts a
 request-local `reasoning_budget_tokens` or `thinking_budget_tokens` value.
 The server's `--alias NAME` sets the model identifier advertised by `/v1/models` and returned in

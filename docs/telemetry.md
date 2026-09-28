@@ -18,7 +18,8 @@ BMOE_PROGRESS {"step":<int>,"steps":<int>,"wall_ms":<float>,"io_ms":<float>,
 
 - `BMOE_LOAD` appears only when experts were read this token; `mb` is the flash bytes read,
   `ms` the read time.
-- `BMOE_PROGRESS.step`/`steps` are 1-based index and target token counts.
+- `BMOE_PROGRESS.step`/`steps` are 1-based index and target token counts. `steps` is `n_predict`,
+  plus the reasoning allowance (budget + forced end sequence) when a reasoning budget is set.
 - `read_mb` is the flash bytes read this token; `stall_ms` is the overlap-only wall time compute
   lost to reads (0 in serial mode).
 - In `--dense-stream` mode, `read_mb` counts actual `FileReader` bytes, including alignment

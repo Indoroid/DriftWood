@@ -156,11 +156,16 @@ struct GenerateRequest {
     // support is initialised at open(); this request switch lets a persistent HTTP session serve
     // both raw /v1/completions and templated /v1/chat/completions without loading the model twice.
     bool chatml = true;
+    // The answer allowance. Without a reasoning budget it counts every generated token, reasoning
+    // included. With one, it counts only tokens outside the reasoning span (see below).
     int n_predict = 32;
     bool think = true;
     std::string reasoning_effort;
-    // -1 leaves reasoning unlimited. A non-negative value limits tokens in the template's
-    // reasoning span without consuming the answer's n_predict allowance.
+    // -1 leaves reasoning unlimited; n_predict then bounds the whole generation, reasoning included.
+    // A non-negative value limits tokens in the template's reasoning span, and those tokens — up to
+    // the budget plus the forced end sequence — do not consume the answer's n_predict allowance. A
+    // model that reopens its span past that allowance is charged to n_predict, so a turn generates at
+    // most n_predict + budget + len(end sequence) tokens. RunSummary::n_reasoning reports the split.
     int reasoning_budget_tokens = -1;
     // Values must be serialized JSON literals (for example, "true" or "\"fast\"") because
     // llama.cpp parses each value before exposing it to the Jinja context.

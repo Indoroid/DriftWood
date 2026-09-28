@@ -12,6 +12,7 @@
 #include "chat.h"
 #include "sampling.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,14 +47,37 @@ bool oldest_complete_turn(const std::vector<common_chat_msg> & history,
                           size_t & end,
                           bool & protected_content);
 
-// llama.cpp's template-delimited reasoning-budget sampler for one turn. `prompt` is the rendered
-// prompt, whose trailing reasoning opener (if a template emits one before decoding) must be counted
-// as already inside the span. Returns nullptr on failure.
-common_sampler * make_reasoning_budget_sampler(const llama_model * model,
-                                               const llama_vocab * vocab,
-                                               const SamplingConfig & sampling,
-                                               int budget_tokens,
-                                               const common_chat_params & chat_params,
-                                               const std::string & prompt);
+// One turn's reasoning budget. llama.cpp owns the mechanism: its common_sampler enforces the budget
+// and forces the template's end sequence. A second instance of llama.cpp's reasoning-budget state
+// machine, with an unlimited budget, observes which generated tokens fall inside the reasoning span,
+// because the pinned common_sampler does not expose its own state. Meitte owns the accounting
+// policy: reasoning tokens do not consume the answer's n_predict allowance (see GenerateRequest).
+class ReasoningBudget {
+public:
+    // `prompt` is the rendered prompt, whose trailing reasoning opener (if a template emits one
+    // before decoding) counts as already inside the span. False when llama.cpp cannot build it.
+    bool init(const llama_model * model,
+              const llama_vocab * vocab,
+              const SamplingConfig & sampling,
+              int budget_tokens,
+              const common_chat_params & chat_params,
+              const std::string & prompt);
+
+    common_sampler * sampler() const { return sampler_.get(); }
+
+    // Reasoning tokens the turn may generate outside the answer allowance: the budget plus the
+    // forced end sequence. Reasoning past it (a model that reopens its span) is charged to n_predict,
+    // so a turn always ends within n_predict + allowance() tokens.
+    int allowance() const { return allowance_; }
+
+    // Accept a generated token into the sampler and the observer. True when the token belongs to the
+    // reasoning span, its opening and closing delimiters included.
+    bool accept(llama_token token);
+
+private:
+    common_sampler_ptr sampler_;
+    std::unique_ptr<llama_sampler, decltype(&llama_sampler_free)> observer_{nullptr, llama_sampler_free};
+    int allowance_ = 0;
+};
 
 } // namespace meitte::detail

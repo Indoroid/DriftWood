@@ -157,7 +157,7 @@ RunResult Session::generate(const GenerateRequest & req,
             const bool automatic = im.cfg.context.grow == ContextMode::Auto ||
                                    im.cfg.context.summarize == ContextMode::Auto ||
                                    im.cfg.context.trim == ContextMode::Auto;
-            const int reserve = automatic ? req.n_predict + 8 : 9;
+            const int reserve = automatic ? req.n_predict + std::max(0, req.reasoning_budget_tokens) + 8 : 9;
             make_context_room = [&, inputs](int reserve) mutable {
                 bool changed_any = false;
                 for (bool tried_summary = false; context_policy_on;) {
@@ -229,8 +229,9 @@ RunResult Session::generate(const GenerateRequest & req,
         return fail("multimodal KV continuation requires a chat template");
     }
 
-    common_sampler_ptr reasoning_sampler;
-    if (req.reasoning_budget_tokens >= 0) {
+    ReasoningBudget reasoning;
+    const bool budget_on = req.reasoning_budget_tokens >= 0;
+    if (budget_on) {
         if (!chat_on) {
             rollback_history();
             return fail("reasoning_budget_tokens requires a chat template");
@@ -241,9 +242,15 @@ RunResult Session::generate(const GenerateRequest & req,
         }
 
         const SamplingConfig & sampling = req.override_sampling ? req.sampling : im.cfg.sampling;
-        reasoning_sampler.reset(make_reasoning_budget_sampler(im.model.get(), im.vocab, sampling,
-                                                              req.reasoning_budget_tokens, chat_params, prompt));
+        if (!reasoning.init(im.model.get(), im.vocab, sampling, req.reasoning_budget_tokens, chat_params, prompt)) {
+            rollback_history();
+            return fail("could not build the reasoning budget sampler");
+        }
     }
+    common_sampler * const reasoning_sampler = reasoning.sampler(); // null without a budget
+    // Output positions the turn may need: the answer allowance plus, under a budget, the reasoning
+    // span that does not consume it.
+    const int output_reserve = req.n_predict + (budget_on ? reasoning.allowance() : 0);
 
     std::vector<llama_token> tokens;
     int n_prompt = 0;
@@ -344,7 +351,7 @@ RunResult Session::generate(const GenerateRequest & req,
                                 im.cfg.context.summarize == ContextMode::Auto ||
                                 im.cfg.context.trim == ContextMode::Auto;
     const long long context_need = (media_kv_continuation ? (long long) media_reuse_n_past : (long long) n_common) +
-                                   (long long) n_new_prompt_tokens + (reserve_output ? req.n_predict : 1) + 8;
+                                   (long long) n_new_prompt_tokens + (reserve_output ? output_reserve : 1) + 8;
     if (!chat_on && context_need > im.cfg.n_ctx && im.cfg.context.grow != ContextMode::Off &&
         context_need <= im.cfg.context.max_ctx) {
         std::string detail;
@@ -426,7 +433,7 @@ RunResult Session::generate(const GenerateRequest & req,
         // mtmd performs text/media llama_decode() calls on THIS text context. Its projector graph
         // has no RouterHook, but every embedding decode through ctx retains DriftWood's MoE hook.
         im.hook->set_batch_phase(/*prefill*/ 0);
-        llama_pos max_prompt_pos = (llama_pos) im.cfg.n_ctx - (reserve_output ? req.n_predict : 1) - 8;
+        llama_pos max_prompt_pos = (llama_pos) im.cfg.n_ctx - (reserve_output ? output_reserve : 1) - 8;
         MtmdRuntime::Prepared prepared;
         std::string media_error;
         const auto & media = has_media ? req.media : im.retained_media;
@@ -437,12 +444,12 @@ RunResult Session::generate(const GenerateRequest & req,
         }
         media_prepare_seconds = secs(media_prepare_start, Clock::now());
         const int64_t need =
-            std::max<int64_t>(prepared.n_pos, prepared.n_tokens) + (reserve_output ? req.n_predict : 1) + 8;
+            std::max<int64_t>(prepared.n_pos, prepared.n_tokens) + (reserve_output ? output_reserve : 1) + 8;
         if (need > im.cfg.n_ctx && im.cfg.context.grow != ContextMode::Off && need <= im.cfg.context.max_ctx) {
             const int next = im.grown_context_size(need);
             if (im.resize_context(next, media_error)) {
                 ctx = im.ctx.get();
-                max_prompt_pos = im.cfg.n_ctx - (reserve_output ? req.n_predict : 1) - 8;
+                max_prompt_pos = im.cfg.n_ctx - (reserve_output ? output_reserve : 1) - 8;
                 res.context_events.push_back("context grew to " + std::to_string(next));
             }
         }
@@ -538,7 +545,11 @@ RunResult Session::generate(const GenerateRequest & req,
     res.ok = true;
     std::string gen;
     std::vector<llama_token> emitted_tokens;
-    int n_gen = 0;
+    int n_gen = 0; // every generated token
+    // Tokens charged to the n_predict allowance. Without a reasoning budget that is every token; with
+    // one, reasoning tokens up to the budget's allowance are not charged (see ReasoningBudget).
+    int n_charged = 0;
+    int n_reasoning = 0;
     double gen_seconds = 0.0;
 
     // Baseline seeded from prefill's closing sample: the summary reports the generation phase
@@ -594,11 +605,11 @@ RunResult Session::generate(const GenerateRequest & req,
     // to the resident reference the gates check); with a sampling chain, draw from the context's
     // last-position logits, which llama_sampler_sample reads at index -1 — the same logits argmax
     // would have read.
-    llama_token tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler.get(), ctx, -1)
+    llama_token tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler, ctx, -1)
                       : smpl            ? llama_sampler_sample(smpl, ctx, -1)
                                         : argmax(logits, im.n_vocab);
 
-    while (n_gen < req.n_predict) {
+    while (n_charged < req.n_predict) {
         if (llama_vocab_is_eog(im.vocab, tok)) break;
         if (n_past + 1 >= im.cfg.n_ctx) {
             bool rebuilt = false;
@@ -674,7 +685,7 @@ RunResult Session::generate(const GenerateRequest & req,
         // goes in BEFORE drafting, so no source is ever asked for tokens with nowhere to go.
         int n_draft = 0;
         double draft_s = 0.0; // this group's drafting + catch-up (see below)
-        const int room = std::min(req.n_predict - n_gen - 1, im.cfg.n_ctx - (int) n_past - 2);
+        const int room = std::min(req.n_predict - n_charged - 1, im.cfg.n_ctx - (int) n_past - 2);
         if (spec_on && room > 0) {
             const auto d0 = Clock::now();
             const uint64_t db0 = moe.enabled ? im.source.stats().read_bytes : 0;
@@ -843,19 +854,23 @@ RunResult Session::generate(const GenerateRequest & req,
             prev_ra_issue_ns = ri;
             prev_ra_wd_ns = rw;
         }
-        for (size_t e = 0; e < confirmed.size() && n_gen < req.n_predict; ++e) {
+        for (size_t e = 0; e < confirmed.size() && n_charged < req.n_predict; ++e) {
             const llama_token out = confirmed[e];
             emitted_tokens.push_back(out);
             std::string delta = token_piece(im.vocab, out);
             gen += delta;
-            if (reasoning_sampler) common_sampler_accept(reasoning_sampler.get(), out, /*is_generated*/ true);
+            const bool reasoning_token = budget_on && reasoning.accept(out);
+            if (reasoning_token && n_reasoning < reasoning.allowance())
+                ++n_reasoning;
+            else
+                ++n_charged;
             if (chat_on) im.kv_tokens.push_back(out);
             if (spec_on) mtp_ctx.push_back(out);
             ++n_gen;
 
             TokenMetrics m;
             m.step = n_gen;
-            m.steps = req.n_predict;
+            m.steps = output_reserve;
             m.mtp_batch = (int) confirmed.size();
             m.loop_overhead_ms = e == 0 ? overhead * 1000.0 : 0.0;
             // Charged to the group's first row like every other group cost. This is a SLICE of
@@ -898,7 +913,7 @@ RunResult Session::generate(const GenerateRequest & req,
         n_past += 1 + n_acc;
         const int32_t row = wide ? n_acc : -1;
         logits = llama_get_logits_ith(ctx, row);
-        tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler.get(), ctx, row)
+        tok = reasoning_sampler ? common_sampler_sample(reasoning_sampler, ctx, row)
               : smpl            ? llama_sampler_sample(smpl, ctx, row)
                                 : argmax(logits, im.n_vocab);
     }
@@ -921,6 +936,7 @@ RunResult Session::generate(const GenerateRequest & req,
     RunSummary & s = res.summary;
     s.arch = im.arch;
     s.n_generated = n_gen;
+    s.n_reasoning = n_reasoning;
     s.gen_seconds = gen_seconds;
     s.s_per_token = n_gen ? gen_seconds / n_gen : 0.0;
     s.tokens_per_second = gen_seconds > 0 ? n_gen / gen_seconds : 0.0;

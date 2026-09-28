@@ -16,7 +16,7 @@ namespace meitte {
 
 struct TokenMetrics {
     int step = 0;            // 1-based index of this token
-    int steps = 0;           // n_predict target
+    int steps = 0;           // generation cap: n_predict, plus the reasoning allowance under a budget
     double wall_ms = 0.0;    // total wall time for this token
     double io_ms = 0.0;      // flash read time this token (serial: subset of wall; overlap: lane-busy sum)
     double mgmt_ms = 0.0;    // cache-management time (vm commit + evict + LRU bookkeeping) this token
@@ -106,6 +106,10 @@ struct RunSummary {
     std::string arch;
 
     int n_generated = 0;
+    // Of n_generated, the reasoning-span tokens that a reasoning budget kept outside the n_predict
+    // allowance (GenerateRequest::reasoning_budget_tokens). 0 without a budget, where n_predict
+    // counts every generated token.
+    int n_reasoning = 0;
     double gen_seconds = 0.0;
     double s_per_token = 0.0;
     double tokens_per_second = 0.0;
