@@ -216,7 +216,8 @@ static int run_session_loop(const RunConfig & cfg,
 
     state->stop.store(true, std::memory_order_release);
     // std::getline cannot be interrupted portably; the detached reader owns only shared state and
-    // a weak session, so it cannot observe freed loop state when stdin eventually wakes it.
+    // a weak session, so it cannot observe freed loop state when stdin eventually wakes it. It can
+    // still hold stdin's stdio lock, which is why main() ends a session run with _Exit.
     if (reader.joinable()) reader.detach();
     return rc;
 }
@@ -996,7 +997,20 @@ int main(int argc, char ** argv) {
     // Interactive session: one persistent process serves many prompts over stdin, keeping the
     // model loaded and the expert cache warm between them. Prompts arrive as JSON requests, not
     // via -p. This is a superset of --progress output (BMOE_* lines), so it never streams inline.
-    if (session_mode) return run_session_loop(cfg, sink.get(), route_trace.get(), compute_trace.get(), io_trace.get());
+    if (session_mode) {
+        const int rc = run_session_loop(cfg, sink.get(), route_trace.get(), compute_trace.get(), io_trace.get());
+        // The detached stdin reader may still be blocked in getline, holding stdin's stdio lock, and
+        // exit() flushes every stdio stream under its lock, so a normal return would hang until the
+        // client closed stdin. The session is already closed; close the sinks, flush what we wrote,
+        // and end without the stdio cleanup.
+        sink.reset();
+        route_trace.reset();
+        compute_trace.reset();
+        io_trace.reset();
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(rc);
+    }
 
     // Perplexity mode: score a fixed text instead of generating one. It opens the same session
     // with the same flags, so a lossy setting is priced under exactly the configuration it ships
