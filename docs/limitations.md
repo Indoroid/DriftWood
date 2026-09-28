@@ -121,6 +121,25 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   targets are stated for Android/Linux.
 - **Depends on a ggml scheduling behaviour** (documented in [seam.md](seam.md)) that is
   not a stability-guaranteed contract. Re-verified by the gates on each submodule bump.
+- **C ABI struct growth.** `meitte_default_config()` and `meitte_default_request()` return their
+  struct by value, so a caller compiled against a shorter header reserves less than a newer library
+  writes. `meitte_config_init()` / `meitte_request_init()` take the caller's size and are the safe
+  path; `meitte_request` must not grow until hosts use them (the bundled `ctypes_smoke.py` still
+  uses the by-value form). `meitte_media` is an array element with no size field, so its layout is
+  frozen: new media metadata needs a new request field that states its element size. The layout
+  published before the dense-stream fields left `dense_stream` in its tail padding; the library
+  treats that exact `struct_size` as the older layout (`tests/library_abi_test.c`).
+- **The C ABI covers a subset of the C++ Session.** It carries a prompt, media, an output limit and
+  `clear_kv`, and returns text, reasoning text, an error and a cancelled flag. Structured messages
+  and content parts, tools and tool calls, thinking controls, reasoning effort and budget, request
+  sampling, template kwargs, finish reasons, context events, summary metrics, perplexity, cache
+  controls and capability queries exist only in C++ (`bmoe/session.h`); hosts that need them use
+  the C++ API or the CLI/server protocols for now.
+- **Raw-mode KV continuation is physical only.** With the chat template off, `clear_kv=false`
+  decodes the new prompt after whatever the KV holds (llama.cpp infers the positions), but the
+  turn's position bookkeeping starts at 0: `RunSummary::n_past`, the context-capacity check and
+  speculative batch positions ignore earlier raw turns, and a rollback clears the whole KV. Chat
+  mode tracks the KV prefix exactly; raw continuation should be treated as best effort.
 
 ## Not goals
 

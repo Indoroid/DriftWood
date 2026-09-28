@@ -63,8 +63,16 @@ typedef struct meitte_config {
     int32_t dense_io_lanes;
     int32_t dense_overlap;
     int32_t dense_two_wave;
+    /* Names the tail padding of the layout above, which callers compiled against it leave
+     * uninitialized; the library never reads it. The next appended field therefore starts past every
+     * earlier sizeof. Append later fields in groups that end on an 8-byte boundary for the same
+     * reason: a field placed in an older layout's tail padding is read from uninitialized bytes when
+     * a caller compiled against that layout passes its sizeof. */
+    int32_t reserved0;
 } meitte_config;
 
+/* An array element: it has no size field, so its layout is fixed. New media metadata needs a new
+ * array field in meitte_request that states its element size (see docs/limitations.md). */
 typedef struct meitte_media {
     const uint8_t * data;
     size_t size;
@@ -81,19 +89,32 @@ typedef struct meitte_request {
     int32_t clear_kv;
     const meitte_media * media;
     size_t media_count;
+    /* Do not append fields here until callers have moved to meitte_request_init(): a caller that
+     * receives meitte_default_request() by value reserves only its own compiled sizeof. */
 } meitte_request;
 
 /* The piece is borrowed for this call only. Return nonzero to cancel generation.
  * Do not call generate or destroy on the session from its callback. */
 typedef int (*meitte_token_callback)(const char * piece, size_t size, void * user_data);
 
+/* Fill the first `size` bytes of a struct with defaults and set struct_size and abi_version. Pass
+ * sizeof the struct as the caller compiled it. The library never writes past `size`, so a caller
+ * built against an older, shorter header stays safe against a newer library. Prefer these. */
+MEITTE_API void meitte_config_init(meitte_config * config, size_t size);
+MEITTE_API void meitte_request_init(meitte_request * request, size_t size);
+/* Return the defaults by value. A struct returned by value has the library's size, not the
+ * caller's: once a field is appended, a caller compiled against the older header receives more bytes
+ * than it reserved. Safe only when the caller and the library use the same header; use the _init
+ * functions above in any caller that can meet a newer library. */
 MEITTE_API meitte_config meitte_default_config(void);
 MEITTE_API meitte_request meitte_default_request(void);
 MEITTE_API uint32_t meitte_abi_version(void);
 MEITTE_API const char * meitte_version(void);
 /* Inputs are borrowed for the call. The error buffer belongs to the caller.
  * A struct can end after any field, provided it includes model_path or prompt.
- * Missing trailing fields use the corresponding default. A session permits one operation at a
+ * Missing trailing fields use the corresponding default. One exception keeps older callers safe:
+ * a meitte_config struct_size equal to the padded sizeof of the layout before dense_stream means that
+ * older layout, so its padding is never read as dense_stream. A session permits one operation at a
  * time, except for cancel. */
 MEITTE_API meitte_session * meitte_open(const meitte_config * config, char * error, size_t error_capacity);
 MEITTE_API meitte_result * meitte_generate(meitte_session * session,

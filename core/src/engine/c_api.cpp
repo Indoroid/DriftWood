@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <stdexcept>
@@ -22,8 +23,21 @@ bool has_field(size_t struct_size, size_t offset, size_t field_size) {
     return struct_size >= offset && struct_size - offset >= field_size;
 }
 
-#define MEITTE_COPY_FIELD(type, output, input, field)                                                                  \
-    if (has_field((input)->struct_size, offsetof(type, field), sizeof((input)->field))) (output).field = (input)->field
+#define MEITTE_COPY_FIELD(type, output, input, size, field)                                                            \
+    if (has_field((size), offsetof(type, field), sizeof((input)->field))) (output).field = (input)->field
+
+constexpr size_t round_up(size_t n, size_t align) {
+    return (n + align - 1) / align * align;
+}
+
+// sizeof(meitte_config) before the dense-stream fields. That layout ended at release_mmap, and its
+// sizeof included 4 bytes of tail padding, which dense_stream now occupies. A caller compiled against
+// that header passes this size with uninitialized padding, so the size means "no dense fields".
+constexpr size_t k_config_size_before_dense = round_up(offsetof(meitte_config, dense_stream), alignof(meitte_config));
+
+size_t config_content_size(size_t struct_size) {
+    return struct_size == k_config_size_before_dense ? offsetof(meitte_config, dense_stream) : struct_size;
+}
 
 } // namespace
 
@@ -43,7 +57,32 @@ meitte_config meitte_default_config() {
 }
 
 meitte_request meitte_default_request() {
-    return {sizeof(meitte_request), MEITTE_ABI_VERSION, nullptr, 128, 1, nullptr, 0};
+    meitte_request out{};
+    out.struct_size = sizeof(out);
+    out.abi_version = MEITTE_ABI_VERSION;
+    out.max_tokens = 128;
+    out.clear_kv = 1;
+    return out;
+}
+
+namespace {
+
+// Copy the defaults into the caller's struct, never past the size the caller owns.
+template <typename T> void init_prefix(T * out, size_t size, const T & defaults) {
+    if (!out || size < offsetof(T, abi_version) + sizeof(uint32_t)) return;
+    const size_t n = size < sizeof(T) ? size : sizeof(T);
+    std::memcpy(out, &defaults, n);
+    out->struct_size = n;
+}
+
+} // namespace
+
+void meitte_config_init(meitte_config * config, size_t size) {
+    init_prefix(config, size, meitte_default_config());
+}
+
+void meitte_request_init(meitte_request * request, size_t size) {
+    init_prefix(request, size, meitte_default_request());
 }
 
 uint32_t meitte_abi_version() {
@@ -61,31 +100,32 @@ meitte_session * meitte_open(const meitte_config * cfg, char * error, size_t cap
             cfg->abi_version != MEITTE_ABI_VERSION)
             throw std::invalid_argument("invalid config size or ABI version");
         meitte_config input = meitte_default_config();
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, model_path);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, projector_path);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, context_size);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, threads);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, streaming);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, cache_mb);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, chat);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, kv_unified);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, speculation);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, context_grow);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, context_summarize);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, context_trim);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, context_min);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, context_max);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, video_fps);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, video_max_frames);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, ffmpeg_bin_dir);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, media_max_bytes);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, release_mmap);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, dense_stream);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, dense_resident_mb);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, dense_window_mb);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, dense_io_lanes);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, dense_overlap);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, dense_two_wave);
+        const size_t config_size = config_content_size(cfg->struct_size);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, model_path);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, projector_path);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, context_size);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, threads);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, streaming);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, cache_mb);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, chat);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, kv_unified);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, speculation);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, context_grow);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, context_summarize);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, context_trim);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, context_min);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, context_max);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, video_fps);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, video_max_frames);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, ffmpeg_bin_dir);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, media_max_bytes);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, release_mmap);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_stream);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_resident_mb);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_window_mb);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_io_lanes);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_overlap);
+        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_two_wave);
         if (!input.model_path || !input.model_path[0]) throw std::invalid_argument("model path is required");
         if (input.speculation < 0 || input.speculation > 2) throw std::invalid_argument("invalid speculation source");
         auto context_mode = [](int32_t value) {
@@ -147,11 +187,11 @@ meitte_generate(meitte_session * session, const meitte_request * req, meitte_tok
                 req->abi_version != MEITTE_ABI_VERSION)
                 throw std::invalid_argument("invalid session, request size, or ABI version");
             meitte_request input = meitte_default_request();
-            MEITTE_COPY_FIELD(meitte_request, input, req, prompt);
-            MEITTE_COPY_FIELD(meitte_request, input, req, max_tokens);
-            MEITTE_COPY_FIELD(meitte_request, input, req, clear_kv);
-            MEITTE_COPY_FIELD(meitte_request, input, req, media);
-            MEITTE_COPY_FIELD(meitte_request, input, req, media_count);
+            MEITTE_COPY_FIELD(meitte_request, input, req, req->struct_size, prompt);
+            MEITTE_COPY_FIELD(meitte_request, input, req, req->struct_size, max_tokens);
+            MEITTE_COPY_FIELD(meitte_request, input, req, req->struct_size, clear_kv);
+            MEITTE_COPY_FIELD(meitte_request, input, req, req->struct_size, media);
+            MEITTE_COPY_FIELD(meitte_request, input, req, req->struct_size, media_count);
             if (!session || !input.prompt || input.max_tokens <= 0 || (input.media_count && !input.media))
                 throw std::invalid_argument("invalid prompt, output limit, or media array");
             meitte::GenerateRequest gr;
@@ -160,7 +200,7 @@ meitte_generate(meitte_session * session, const meitte_request * req, meitte_tok
             gr.clear_kv = input.clear_kv != 0;
             size_t total = 0;
             for (size_t i = 0; i < input.media_count; ++i) {
-                const auto & item = input.media[i];
+                const meitte_media & item = input.media[i];
                 if (!item.data || !item.size || item.kind < 0 || item.kind > 3 ||
                     item.size > session->media_max_bytes || total > session->media_max_bytes - item.size)
                     throw std::invalid_argument("invalid media or media byte limit exceeded");

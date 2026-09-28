@@ -124,6 +124,9 @@ Set `-DBMOE_BUILD_SHARED=ON` to build and install `libmeitte` (`meitte.dll` on W
 versioned C API in `core/include/bmoe/meitte.h` uses opaque sessions and results, caller-owned
 input spans, synchronous borrowed token callbacks, cancellation, and explicit destruction. Each
 configuration and request has a size tag; older prefixes use the defaults for later fields.
+Initialize them with `meitte_config_init()` / `meitte_request_init()`, which write only the size the
+caller passes; the by-value `meitte_default_*()` forms are safe only against the exact header the
+caller compiled with (see [limitations.md](limitations.md)).
 
 [`examples/python/ctypes_smoke.py`](../examples/python/ctypes_smoke.py) first checks the C error
 ownership path without a model. Pass `--model /path/to/model.gguf` to also exercise callback and

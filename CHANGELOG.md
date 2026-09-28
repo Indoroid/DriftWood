@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- C ABI: add `meitte_config_init()` and `meitte_request_init()`, which fill defaults without writing
+  past the caller's struct size. Fix a padding hazard: the `meitte_config` layout before the dense
+  fields ended in tail padding that `dense_stream` now occupies, so callers compiled against it had
+  uninitialized bytes read as `dense_stream`; that exact `struct_size` now means the older layout.
+  `reserved0` names the current tail padding so the next field starts past every earlier `sizeof`.
+  `tests/library_abi_test.c` reproduces old callers' layouts against the current library.
 - Make `Session::perplexity()` leave the session in the documented new-chat state on every return
   path. It cleared the KV and `kv_tokens` but kept the chat history, retained media, draft context
   and the scored text in the KV, so a following `clear_kv=false` turn decoded after the scored text.
