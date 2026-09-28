@@ -76,7 +76,10 @@ and un-appending the user message) so prior turns stay usable and the conversati
 A failed turn rolls back the same way, and so does the session sampler's RNG. When the KV cannot
 keep the reused prefix (recurrent or hybrid memory refuses a partial removal), the rollback clears
 the KV together with its token records and the next turn rebuilds the conversation from the
-transcript — the KV and the engine's record of it never disagree.
+transcript — the KV and the engine's record of it never disagree. With speculation on, such a
+context holds recurrent-state snapshots for the verify rollback. llama.cpp would also accept a
+turn-level removal of up to `draft_max` positions and restore a snapshot of the wrong position, so
+the engine treats every removal outside the last verify batch as refused (see limitations.md).
 `RunResult::finish` says why a turn ended (`stop`, `length`, `cancelled`, `context_full`, `error`).
 On failure, `rejected` marks a request refused before it changed any state, and `fatal` marks the
 only failure that ends the session (a fatal streaming I/O error); frontends act on these flags

@@ -139,11 +139,36 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   sampling, template kwargs, finish reasons, context events, summary metrics, perplexity, cache
   controls and capability queries exist only in C++ (`bmoe/session.h`); hosts that need them use
   the C++ API or the CLI/server protocols for now.
+- **Hybrid and recurrent models rebuild the KV after a rolled-back turn.** Trigger: a cancelled or
+  failed chat turn on a model with recurrent state (`qwen35`, `qwen35moe` and other hybrid
+  attention/SSM models). Cause: llama.cpp's recurrent memory cannot remove positions from its
+  state, so the rollback clears the KV with its records and the next turn prefills the whole
+  transcript in one pass. Evidence: Qwen3.8-27B, turn 3 cancelled after 5 tokens: the retry
+  prefilled 83 tokens instead of 26, and its text starts like the uninterrupted turn but is not
+  bit-identical over the turn, because one prefill rounds differently from the incremental path.
+  Affected: prefill time of the retry; the output stays coherent.
+  Evaluated and not adopted: recurrent-state snapshots for chat sessions
+  (`llama_context_params::n_rs_seq >= 1`). A snapshot holds the state after one of the last
+  `n_rs_seq` tokens of the last decoded ubatch, and a one-token decode step writes only the newest
+  slot. A rollback to the start of a turn crosses the prefill and every decode step, so no snapshot
+  holds the state before the turn. llama.cpp still accepts any removal of up to `n_rs_seq` positions
+  and restores the wrong slot. Measured with libllama on both models (7 positions removed across
+  four ubatches, `n_rs_seq = 8`, then one decode): the logits differ from a directly built state by
+  up to 7.2 (Qwen3.6-35B-A3B) and 10.1 (Qwen3.8-27B) and the top token changes; a removal inside
+  one ubatch differs by 0.53 and 0.36, the same as splitting the prefill (0.48, 0.41). Cost: one
+  snapshot is 62.8 MiB on Qwen3.6-35B-A3B and 149.6 MiB on Qwen3.8-27B (`n_rs_seq = 8`: 565 and
+  1347 MiB of recurrent state). Speculation requests `n_rs_seq = draft_max` for its verify
+  rollback, so the engine uses the snapshots only to trim inside the last verify batch; every other
+  removal on such a context takes the clear-and-rebuild path (`tests/hybrid_rollback_test.cpp`).
+  Possible remedies: a partial-state checkpoint of the turn start through the public
+  `llama_state_seq_get_data_ext`/`llama_state_seq_set_data_ext` with
+  `LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY` (one recurrent state per checkpoint, sizes as above), or an
+  upstream `llama_memory_seq_rm` that refuses a snapshot rollback deeper than the last ubatch.
 - **Hybrid and recurrent models re-prefill every continued turn.** Prefix reuse trims the KV back to
-  the common prefix, and recurrent state cannot drop a partial tail without a snapshot, so on
-  such models (qwen35moe among them) the trim is refused, the KV is cleared with its records, and
-  the whole transcript is prefilled again. The output is exact (verified with cancel and retry on
-  Qwen3.6-35B-A3B); the cost is prefill time per turn.
+  the common prefix, and recurrent state cannot drop a partial tail, so on such models (qwen35moe
+  among them) the trim is refused, the KV is cleared with its records, and the whole transcript is
+  prefilled again. The output is exact (verified with cancel and retry on Qwen3.6-35B-A3B); the
+  cost is prefill time per turn.
 - **Raw-mode KV continuation is physical only.** With the chat template off, `clear_kv=false`
   decodes the new prompt after whatever the KV holds (llama.cpp infers the positions), but the
   turn's position bookkeeping starts at 0: `RunSummary::n_past`, the context-capacity check and

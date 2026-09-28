@@ -90,8 +90,16 @@ int testing::pending_kv_removal_failures() {
     return detail::forced_kv_removal_failures.load(std::memory_order_relaxed);
 }
 
-bool Session::Impl::truncate_kv(llama_pos keep_pos, size_t keep_tokens) {
-    bool kept = detail::kv_remove_tail(ctx.get(), keep_pos);
+bool Session::Impl::truncate_kv(llama_pos keep_pos, size_t keep_tokens, bool in_last_decode) {
+    // With recurrent-state snapshots (n_rs_seq > 0: speculation on a recurrent or hybrid model),
+    // llama.cpp accepts the removal of up to n_rs_seq positions and restores a snapshot. A snapshot
+    // holds the state after one of the last tokens of the LAST decoded ubatch only, and llama.cpp
+    // does not check that the removal stays inside that ubatch. A removal that goes back further
+    // restores the state of a different position without an error. Thus only a trim inside the last
+    // decode can use the snapshots. Any other removal on such a context is treated as refused.
+    const bool has_tail = llama_memory_seq_pos_max(llama_get_memory(ctx.get()), 0) >= keep_pos;
+    const bool snapshot_unsafe = has_tail && !in_last_decode && llama_n_rs_seq(ctx.get()) > 0;
+    bool kept = !snapshot_unsafe && detail::kv_remove_tail(ctx.get(), keep_pos);
     // The draft context mirrors the target's positions. A draft that cannot follow would make the
     // next draft decode start at a position it does not hold, so it forces the full reset too.
     if (kept && ctx_dft) kept = detail::kv_remove_tail(ctx_dft.get(), keep_pos);

@@ -195,7 +195,11 @@ struct Session::Impl {
     // kv_tokens, kv_n_past and kv_last_generation_start. The next turn then rebuilds the conversation
     // from chat_history (and from retained_media for a media transcript, as after a context resize).
     // Returns false in that case.
-    bool truncate_kv(llama_pos keep_pos, size_t keep_tokens);
+    //
+    // `in_last_decode` says that every removed position was decoded by the last llama_decode call
+    // (the trim after a speculative verify batch). Only such a removal may use recurrent-state
+    // snapshots; see the definition.
+    bool truncate_kv(llama_pos keep_pos, size_t keep_tokens, bool in_last_decode);
     // Drop the KV, the conversation and the retained media: the state of a new chat.
     void reset_conversation();
 

@@ -346,7 +346,8 @@ RunResult Session::generate(const GenerateRequest & req,
             // everything it generated. Miss this and the first prefill batch of the turn starts at a
             // position the draft context already has, which llama.cpp rejects outright: the second
             // message of a conversation fails while the first always works.
-            if ((n_common < im.kv_tokens.size() || im.ctx_dft) && !im.truncate_kv((llama_pos) n_common, n_common))
+            if ((n_common < im.kv_tokens.size() || im.ctx_dft) &&
+                !im.truncate_kv((llama_pos) n_common, n_common, /*in_last_decode*/ false))
                 n_common = 0;
         }
     }
@@ -389,7 +390,7 @@ RunResult Session::generate(const GenerateRequest & req,
             // The draft context follows the target to the same position (truncate_kv): a turn that
             // left the two at different positions would fail the NEXT turn, not this one. When the
             // prefix cannot be kept, the records are cleared with it and the next turn rebuilds.
-            if (im.truncate_kv(rollback_n_past, rollback_tokens)) {
+            if (im.truncate_kv(rollback_n_past, rollback_tokens, /*in_last_decode*/ false)) {
                 im.kv_last_generation_start = rollback_generation_start;
                 if (media_kv_continuation) im.kv_n_past = rollback_n_past;
             }
@@ -944,7 +945,7 @@ RunResult Session::generate(const GenerateRequest & req,
     llama_pos kv_end = n_past; // the physical end of this turn in the KV
     if (spec_on) {
         const llama_pos emitted_end = prompt_n_past + n_gen;
-        kv_end = im.truncate_kv(emitted_end, im.kv_tokens.size()) ? emitted_end : 0;
+        kv_end = im.truncate_kv(emitted_end, im.kv_tokens.size(), /*in_last_decode*/ true) ? emitted_end : 0;
     }
 
     res.finish = res.context_exhausted ? FinishReason::ContextFull

@@ -175,7 +175,8 @@ same rule the rest of the engine follows ([seam.md](seam.md)).
 Self-speculation means one model and two contexts over it:
 
 - the **target** context, created with `n_rs_seq = --draft` so a rejected tail is rewound from a
-  bounded snapshot instead of replayed;
+  bounded snapshot instead of replayed. The snapshots cover the last verify batch only, so a
+  turn-level rollback does not use them ([limitations.md](limitations.md));
 - the **draft** context, created with `ctx_type = LLAMA_CONTEXT_TYPE_MTP` so llama.cpp builds the
   nextn graph, and carrying the **same eval callback** as the target — the router hook is per-context,
   not per-model.

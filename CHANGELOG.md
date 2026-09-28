@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- Fix continued chat turns and rollbacks on recurrent and hybrid models with speculation on
+  (`--mtp`, `--ngram`) decoding from the recurrent state of a different position. Speculation
+  creates the context with `n_rs_seq = draft_max` snapshots, which cover the last decoded ubatch
+  only, but llama.cpp accepts any removal of up to `n_rs_seq` positions. A turn whose cached tail
+  diverged by at most `draft_max` tokens (for example `--draft 8` on Qwen3.6-35B-A3B, whose
+  template drops the empty reasoning block from history) kept a wrong state; turn 2 answered "Blue"
+  instead of "Red". The engine now uses the snapshots only to trim inside the last verify batch
+  and clears and rebuilds for every other removal. `tests/hybrid_rollback_test.cpp` runs when
+  `BMOE_TEST_HYBRID_MODEL` is configured. Recurrent snapshots for plain chat rollback were
+  evaluated and not adopted; `docs/limitations.md` records the measurements.
 - Expert-stream and dense-weight load failures now reach the caller with their cause.
   `DenseWeights::init` and `ExpertStreamSource::init` return the reason instead of printing it, so
   `--dense-weights ahwb` off Android reports "expert stream source init failed: dense-weights init
