@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Fix `--mtp` aborting inside llama.cpp on every MTP model: the pinned llama.cpp loads the nextn
+  tensors only when `llama_model_params::load_mtp` is set, which the engine never did. Verified on
+  Qwen3.6-35B-A3B (UD-IQ1_M): 82 % draft acceptance, streamed output identical to resident.
+- Fix `meitte-cli --session` hanging after `{"cmd":"close"}` while the client keeps stdin open: exit
+  flushed stdio under stdin's lock, which the detached reader held in `getline`.
 - `meitte-cli --session` no longer ends on any failure outside two matched error texts: `BMOE_ERROR`
   `fatal` now follows the engine, so a refused or rolled-back request leaves the session serving.
   `BMOE_DONE` adds `finish`.

@@ -139,6 +139,11 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   sampling, template kwargs, finish reasons, context events, summary metrics, perplexity, cache
   controls and capability queries exist only in C++ (`bmoe/session.h`); hosts that need them use
   the C++ API or the CLI/server protocols for now.
+- **Hybrid and recurrent models re-prefill every continued turn.** Prefix reuse trims the KV back to
+  the common prefix, and recurrent state cannot drop a partial tail without a snapshot, so on
+  such models (qwen35moe among them) the trim is refused, the KV is cleared with its records, and
+  the whole transcript is prefilled again. The output is exact (verified with cancel and retry on
+  Qwen3.6-35B-A3B); the cost is prefill time per turn.
 - **Raw-mode KV continuation is physical only.** With the chat template off, `clear_kv=false`
   decodes the new prompt after whatever the KV holds (llama.cpp infers the positions), but the
   turn's position bookkeeping starts at 0: `RunSummary::n_past`, the context-capacity check and

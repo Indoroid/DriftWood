@@ -236,6 +236,9 @@ bool Session::Impl::load_model(LazyGgufMeta & meta, std::string & error) {
     mparams.load_mode = LLAMA_LOAD_MODE_MMAP;
     mparams.use_extra_bufts = false;
     mparams.n_gpu_layers = 0;
+    // llama.cpp skips the MTP (nextn) tensors unless asked, and building the draft context without
+    // them fails an assert inside llama.cpp. Only an MTP session pays for loading them.
+    mparams.load_mtp = cfg.spec.is_mtp();
 
     // These are placement requests interpreted by llama.cpp while it loads a fully resident
     // model. The strings belong to cfg and the C array stays alive through the load call.
