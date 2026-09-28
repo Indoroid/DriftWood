@@ -27,15 +27,19 @@ ExpertStreamSource::~ExpertStreamSource() {
 bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
                               int n_expert,
                               std::vector<LayerExperts> layers,
-                              const MoeStreamConfig & cfg) {
-    if (active_) return false;
+                              const MoeStreamConfig & cfg,
+                              std::string & error) {
+    if (active_) {
+        error = "the expert stream source is already active";
+        return false;
+    }
     fatal_.store(false, std::memory_order_release);
     if (n_expert <= 0) {
-        std::fprintf(stderr, "bmoe: expert streaming needs a MoE model (n_expert=%d)\n", n_expert);
+        error = "expert streaming needs a MoE model (n_expert=" + std::to_string(n_expert) + ")";
         return false;
     }
     if (shard_paths.empty()) {
-        std::fprintf(stderr, "bmoe: expert streaming got no model file\n");
+        error = "expert streaming got no model file";
         return false;
     }
 
@@ -71,7 +75,7 @@ bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
     for (int p = 0; p < MoeRecipe::max_exps; ++p)
         max_full_any = std::max(max_full_any, max_full[p]);
     if (max_full_any == 0) {
-        std::fprintf(stderr, "bmoe: no MoE layers were bound\n");
+        error = "no MoE layers were bound";
         return false;
     }
 
@@ -144,7 +148,7 @@ bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
             if (max_full[p] == 0) continue;
             slot_[p] = pio::alloc_aligned(align_, max_full[p]);
             if (!slot_[p]) {
-                std::fprintf(stderr, "bmoe: slot alloc %zu failed\n", max_full[p]);
+                error = "expert slot allocation of " + std::to_string(max_full[p]) + " bytes failed";
                 return false;
             }
         }
@@ -171,7 +175,8 @@ bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
                 const size_t full = (size_t) L.proj[p].nb2 * (size_t) n_expert_;
                 lbuf_[p][il] = pio::vm_reserve(full);
                 if (!lbuf_[p][il]) {
-                    std::fprintf(stderr, "bmoe: vm_reserve %zu failed (layer %d)\n", full, il);
+                    error = "reserving " + std::to_string(full) + " bytes of address space for layer " +
+                            std::to_string(il) + " failed";
                     return false;
                 }
                 lbuf_sz_[p][il] = full;
@@ -201,7 +206,10 @@ bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
     const size_t bounce_cap = max_slice + 2 * align_;
     for (const std::string & sp : shard_paths) {
         readers_.push_back(std::unique_ptr<FileReader>(new FileReader()));
-        if (!readers_.back()->open(sp, io_threads_, cfg.o_direct, align_, bounce_cap)) return false;
+        if (!readers_.back()->open(sp, io_threads_, cfg.o_direct, align_, bounce_cap)) {
+            error = "cannot open " + sp + " for the expert reads";
+            return false;
+        }
     }
     // Each shard resolved direct for itself at open — the platform's answer plus the open-time
     // verify — so the run-level fact is the weakest shard: a mixed run must not be advertised as
@@ -215,8 +223,8 @@ bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
         if (!L.bound) continue;
         for (int p = 0; p < MoeRecipe::max_exps; ++p)
             if (L.proj[p].nb2 && (L.proj[p].file_idx < 0 || L.proj[p].file_idx >= (int) readers_.size())) {
-                std::fprintf(stderr, "bmoe: expert tensor points at shard %d of %zu\n", L.proj[p].file_idx,
-                             readers_.size());
+                error = "expert tensor points at shard " + std::to_string(L.proj[p].file_idx) + " of " +
+                        std::to_string(readers_.size());
                 return false;
             }
     }
@@ -270,8 +278,8 @@ bool ExpertStreamSource::init(const std::vector<std::string> & shard_paths,
         for (size_t s = 0; s < readers_.size(); ++s)
             ranges[s] = DenseWeights::byte_ranges(std::move(exp[s]), readers_[s]->file_size());
         dense_.set_row_gathered(std::move(row_tensors_), row_budget_);
-        if (!dense_.init(cfg.dense_weights, shard_paths, align_, std::move(ranges), std::move(dense_tensors_))) {
-            std::fprintf(stderr, "bmoe: dense-weights init failed\n");
+        if (!dense_.init(cfg.dense_weights, shard_paths, align_, std::move(ranges), std::move(dense_tensors_), error)) {
+            error = "dense-weights init failed: " + error;
             return false;
         }
     }

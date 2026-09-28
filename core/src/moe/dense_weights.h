@@ -66,12 +66,14 @@ public:
     // `tensors` is what Anonymous/Pinned read, and what every mode checks for a tensor too large to
     // be resident — see hold_back_oversized). `align` is the O_DIRECT block size. Runs once at load,
     // before the streamer's workers start (Anonymous rebinds tensor->data on the caller's thread).
-    // Returns false only on a hard Anonymous failure (alloc/read); Mmap and Warmed cannot fail.
+    // Returns false only on a hard Anonymous/Pinned failure (platform, open, alloc, read), with the
+    // cause in `error`; Mmap and Warmed cannot fail.
     bool init(DenseWeightsMode mode,
               const std::vector<std::string> & paths,
               size_t align,
               std::vector<std::vector<std::pair<uint64_t, uint64_t>>> ranges,
-              std::vector<DenseTensorRef> tensors);
+              std::vector<DenseTensorRef> tensors,
+              std::string & error);
 
     // Tables the graph only ever ROW-GATHERS (discovered by RouterHook, never named here): instead
     // of being made resident, they are bound to reserved address space and served from flash a row
@@ -108,7 +110,7 @@ private:
     // Random-access advice on the mmap of every held-back tensor: a fault brings in one page, not a
     // readahead window the gather will never touch.
     void advise_random_mapped();
-    bool read_anonymous(size_t align);
+    bool read_anonymous(size_t align, std::string & error);
     void warm();
     void drop_mmap_copies(size_t page);
     void sample_anon(size_t page);

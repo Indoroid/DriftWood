@@ -469,8 +469,9 @@ bool Session::Impl::bind_dense_stream(LazyGgufMeta & meta, std::string & error) 
     const size_t n_streamed = candidates.size();
     // The anonymous owner reads the fixed set once. The bounded streamer rebinds the rest to
     // stable reserved addresses and commits pages only while their layer is active.
-    if (!dense_fixed.init(DenseWeightsMode::Anonymous, offs.shard_paths, 4096, {}, std::move(pinned)))
-        return fail(error, "dense fixed-resident load failed");
+    std::string fixed_error;
+    if (!dense_fixed.init(DenseWeightsMode::Anonymous, offs.shard_paths, 4096, {}, std::move(pinned), fixed_error))
+        return fail(error, "dense fixed-resident load failed: " + fixed_error);
     if (!dense_stream.init(std::move(candidates), offs.shard_paths, 4096, window, cfg.dense_stream.io_lanes,
                            cfg.dense_stream.overlap, cfg.dense_stream.two_wave, &cancel_requested))
         return fail(error, "dense stream setup failed");
@@ -588,8 +589,9 @@ bool Session::Impl::bind_expert_stream(const MoeRecipe & recipe,
         source.set_row_tensors(std::move(rows), row_budget);
     }
 
-    if (!source.init(offs.shard_paths, n_expert, std::move(layers), cfg.moe))
-        return fail(error, "expert stream source init failed");
+    std::string source_error;
+    if (!source.init(offs.shard_paths, n_expert, std::move(layers), cfg.moe, source_error))
+        return fail(error, "expert stream source init failed: " + source_error);
     hook->set_source(&source);
     // The row policy exists only once dense_.init has taken the tables over; null means nothing
     // qualified or the takeover declined, and the hook then costs exactly nothing per node.

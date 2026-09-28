@@ -65,11 +65,12 @@ public:
     // Build buffers, rebind the bound layers' expert tensors onto them, and start the
     // I/O pool. `layers` is indexed by layer id (unbound entries are skipped); each tensor's
     // file_idx indexes `shard_paths` (a single-file model passes one path). Returns false on
-    // any allocation/open failure or an inconsistent tensor.
+    // any allocation/open failure or an inconsistent tensor, with the cause in `error`.
     bool init(const std::vector<std::string> & shard_paths,
               int n_expert,
               std::vector<LayerExperts> layers,
-              const MoeStreamConfig & cfg);
+              const MoeStreamConfig & cfg,
+              std::string & error);
 
     // Supply the dense (non-expert) weight tensors the DenseWeights policy may need (only the
     // Anonymous mode reads+rebinds them). Call BEFORE init, which hands them to the dense module.

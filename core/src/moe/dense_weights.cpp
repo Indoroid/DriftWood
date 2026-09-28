@@ -34,7 +34,8 @@ bool DenseWeights::init(DenseWeightsMode mode,
                         const std::vector<std::string> & paths,
                         size_t align,
                         std::vector<std::vector<std::pair<uint64_t, uint64_t>>> ranges,
-                        std::vector<DenseTensorRef> tensors) {
+                        std::vector<DenseTensorRef> tensors,
+                        std::string & error) {
     mode_ = mode;
     paths_ = paths;
     align_ = align ? align : 4096;
@@ -55,8 +56,8 @@ bool DenseWeights::init(DenseWeightsMode mode,
             return true;
         }
         if (mode_ == DenseWeightsMode::Pinned && pio::pinned_max_bytes() == 0) {
-            std::fprintf(stderr, "bmoe: --dense-weights ahwb needs reclaim-exempt memory, which this "
-                                 "platform does not provide (Android only)\n");
+            error = "--dense-weights ahwb needs reclaim-exempt memory, which this platform does not provide "
+                    "(Android only)";
             return false;
         }
         // Single-lane readers (one per shard) with a bounce large enough for our chunk; O_DIRECT
@@ -65,9 +66,12 @@ bool DenseWeights::init(DenseWeightsMode mode,
         const size_t chunk = 8ull << 20;
         for (const std::string & p : paths_) {
             readers_.push_back(std::unique_ptr<FileReader>(new FileReader()));
-            if (!readers_.back()->open(p, 1, /*direct=*/true, align_, chunk + 2 * align_)) return false;
+            if (!readers_.back()->open(p, 1, /*direct=*/true, align_, chunk + 2 * align_)) {
+                error = "cannot open " + p + " for the dense-weight reads";
+                return false;
+            }
         }
-        if (!read_anonymous(align_)) return false;
+        if (!read_anonymous(align_, error)) return false;
         // The tensors are copied and rebound; nothing reads through these again. Their fds and
         // per-lane bounce buffers would otherwise sit allocated for the whole session, next to
         // the expert cache that is counting every MiB.
@@ -243,7 +247,7 @@ void DenseWeights::advise_random_mapped() {
 // practice: the largest dense tensor here is an embedding or lm_head, far below it. A tensor that
 // did exceed it fails the run rather than quietly taking an anon buffer, because a silent mix would
 // make the comparison meaningless in exactly the direction that flatters the feature.
-bool DenseWeights::read_anonymous(size_t align) {
+bool DenseWeights::read_anonymous(size_t align, std::string & error) {
     const bool pinned = mode_ == DenseWeightsMode::Pinned;
     const uint64_t chunk = 8ull << 20;
     uint64_t total = 0;
@@ -253,15 +257,16 @@ bool DenseWeights::read_anonymous(size_t align) {
     for (const DenseTensorRef & d : tensors_) {
         if (!d.tensor || d.size == 0) continue;
         if (d.file_idx < 0 || d.file_idx >= (int) readers_.size()) {
-            std::fprintf(stderr, "bmoe: dense tensor points at shard %d of %zu\n", d.file_idx, readers_.size());
+            error =
+                "dense tensor points at shard " + std::to_string(d.file_idx) + " of " + std::to_string(readers_.size());
             return false;
         }
         void * buf = nullptr;
         if (pinned) {
             pio::PinnedAlloc pa;
             if (!pio::pinned_alloc((size_t) d.size, &pa)) {
-                std::fprintf(stderr, "bmoe: pinned dense buffer %llu MiB failed (ceiling %llu MiB)\n",
-                             (unsigned long long) (d.size >> 20), (unsigned long long) (pio::pinned_max_bytes() >> 20));
+                error = "pinned dense buffer of " + std::to_string(d.size >> 20) + " MiB failed (ceiling " +
+                        std::to_string(pio::pinned_max_bytes() >> 20) + " MiB)";
                 return false;
             }
             pinned_.push_back(pa); // tracked for shutdown even if a chunk read below fails
@@ -269,7 +274,7 @@ bool DenseWeights::read_anonymous(size_t align) {
         } else {
             buf = pio::alloc_aligned(align, (size_t) d.size);
             if (!buf) {
-                std::fprintf(stderr, "bmoe: dense buffer alloc %llu failed\n", (unsigned long long) d.size);
+                error = "dense buffer allocation of " + std::to_string(d.size) + " bytes failed";
                 return false;
             }
             bufs_.push_back(buf); // tracked for shutdown even if a chunk read below fails
@@ -278,7 +283,10 @@ bool DenseWeights::read_anonymous(size_t align) {
         buf_sz_.push_back((size_t) d.size);
         for (uint64_t done = 0; done < d.size;) {
             const uint64_t n = std::min<uint64_t>(chunk, d.size - done);
-            if (readers_[(size_t) d.file_idx]->read(0, (char *) buf + done, d.file_off + done, n) < 0) return false;
+            if (readers_[(size_t) d.file_idx]->read(0, (char *) buf + done, d.file_off + done, n) < 0) {
+                error = "dense-weight read failed: " + paths_[(size_t) d.file_idx];
+                return false;
+            }
             done += n;
         }
         d.tensor->data = buf; // rebind the model weight onto its private copy

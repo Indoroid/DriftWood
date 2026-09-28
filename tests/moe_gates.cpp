@@ -770,6 +770,26 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // G16 — ahwb puts the dense weights in reclaim-exempt memory. Where the platform has it, the
+    // rebind must be byte-identical like G6. Where it has none, the failure must reach the caller
+    // with its cause: RunResult, the server and the C ABI used to get only "expert stream source
+    // init failed", and the reason went to stderr.
+    {
+        RunConfig pinned = base(model);
+        pinned.moe.enabled = true;
+        pinned.moe.cache_mb = 0;
+        pinned.moe.dense_weights = DenseWeightsMode::Pinned;
+        RunResult r = run(pinned);
+        if (r) {
+            fails += check("G16 dense=ahwb(rebind) == resident", s_res, r.generated_text);
+        } else if (r.error.find("reclaim-exempt memory") == std::string::npos) {
+            std::printf("[FAIL] G16 dense=ahwb failure must name its cause, got: %s\n", r.error.c_str());
+            ++fails;
+        } else {
+            std::printf("[PASS] G16 dense=ahwb unsupported here, and the error says why: %s\n", r.error.c_str());
+        }
+    }
+
     if (fails == 0) std::printf("\nall MoE byte-identity gates passed\n");
     return fails == 0 ? 0 : 1;
 }

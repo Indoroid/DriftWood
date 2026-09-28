@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Expert-stream and dense-weight load failures now reach the caller with their cause.
+  `DenseWeights::init` and `ExpertStreamSource::init` return the reason instead of printing it, so
+  `--dense-weights ahwb` off Android reports "expert stream source init failed: dense-weights init
+  failed: --dense-weights ahwb needs reclaim-exempt memory …" in `RunResult::error`, the server
+  and the C ABI; they used to get only "expert stream source init failed". Gate G16 checks it.
 - `--moe-stream` on a model without experts now fails with "expert streaming (--moe-stream) needs
   a model with experts … use dense streaming (--dense-stream)". `Session::open` checks the GGUF
   expert count before the recipe lookup, which used to ask for a new recipe in

@@ -183,7 +183,9 @@ refaulting them.
 `--dense-weights ahwb` puts the dense weights there. It is `anon` with one substitution — the buffer
 comes from `pio::pinned_alloc` instead of the heap — so an A/B against `anon` moves a single
 variable, and it refuses to start where the platform has no such allocation rather than falling
-back, which would let the comparison quietly become a mode against itself.
+back, which would let the comparison quietly become a mode against itself. The open error says so
+("needs reclaim-exempt memory, which this platform does not provide"), in the CLI, the server and
+the C ABI alike.
 
 **Measured, in-app, on a long generation** ([2026-07-21](bench-data/2026-07-21-pinned-dense-ab/findings.md)):
 
