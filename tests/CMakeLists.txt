@@ -127,6 +127,9 @@ if(PYTHON3)
     if(BMOE_BUILD_CLI)
         add_test(NAME server_cli_parity
                  COMMAND ${PYTHON3} ${CMAKE_SOURCE_DIR}/scripts/check-server-cli-parity.py)
+        add_test(NAME dense_weights_flag
+                 COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/dense_weights_flag_test.py
+                         $<TARGET_FILE:meitte-cli> $<TARGET_FILE:meitte-server>)
     endif()
 
     set(_gguf_py "${CMAKE_SOURCE_DIR}/third_party/llama.cpp/gguf-py")

@@ -358,7 +358,8 @@ static void print_usage(const char * argv0) {
         "      --cache-ceil-mb N   with --cache-mb auto: upper bound on the budget (0 = no cap)\n"
         "      --io-threads N      parallel expert-read lanes [1..%d] (default 4)\n"
         "      --no-odirect        do not bypass the page cache for expert reads\n"
-        "      --dense-weights M   dense (non-expert) weight policy: mmap | warm | anon (default) | ahwb\n"
+        "      --dense-weights M   dense (non-expert) weight policy: mmap | warm | anon (default) | ahwb;\n"
+        "                          requires --moe-stream (the streamer applies it)\n"
         "                          (warm = page-cache them at load, best when the model fits in RAM;\n"
         "                          anon = read via O_DIRECT into our own buffers and rebind, so a\n"
         "                          reclaim hits zram not flash — the win on >RAM models;\n"
@@ -752,6 +753,7 @@ int main(int argc, char ** argv) {
         else if (a == "--row-stream-mb")
             cfg.moe.row_stream_mb = std::atoi(next("--row-stream-mb"));
         else if (a == "--dense-weights") {
+            cfg.moe.dense_weights_set = true;
             const std::string m = next("--dense-weights");
             if (m == "mmap")
                 cfg.moe.dense_weights = meitte::DenseWeightsMode::Mmap;
@@ -768,11 +770,13 @@ int main(int argc, char ** argv) {
         }
         // Deprecated aliases, kept so existing scripts and the app keep working: --no-warm-dense is
         // the Mmap policy, --dense-odirect is Anonymous. Prefer --dense-weights.
-        else if (a == "--no-warm-dense")
+        else if (a == "--no-warm-dense") {
             cfg.moe.dense_weights = meitte::DenseWeightsMode::Mmap;
-        else if (a == "--dense-odirect")
+            cfg.moe.dense_weights_set = true;
+        } else if (a == "--dense-odirect") {
             cfg.moe.dense_weights = meitte::DenseWeightsMode::Anonymous;
-        else if (a == "--load-all")
+            cfg.moe.dense_weights_set = true;
+        } else if (a == "--load-all")
             cfg.moe.load_all = true;
         else if (a == "--force-cache")
             cfg.moe.force_cache = true;

@@ -265,6 +265,20 @@ int main() {
         c.moe.prefetch_layers = 0;
         expect_ok("route_ahead with the cache and no predictor", c);
     }
+    // The dense-weights policy is applied by the streamer only. The default mode is a valid explicit
+    // choice too, so the rule follows dense_weights_set as well as the value.
+    {
+        RunConfig c = ok_base();
+        expect_ok("default dense_weights without streaming", c);
+        c.moe.dense_weights_set = true;
+        expect_fail("explicit dense_weights (default mode) requires streaming", c);
+        c.moe.dense_weights_set = false;
+        c.moe.dense_weights = DenseWeightsMode::Mmap;
+        expect_fail("non-default dense_weights requires streaming", c);
+        c.moe.enabled = true;
+        c.moe.dense_weights_set = true;
+        expect_ok("explicit dense_weights with streaming", c);
+    }
     // A verify decode is several positions wide, and route-ahead declines to commit on every one of
     // them while still paying for the prediction and the early reads — measured, see config.cpp.
     {

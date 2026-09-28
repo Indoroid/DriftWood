@@ -361,6 +361,12 @@ ValidationResult validate(const RunConfig & cfg) {
         return fail("moe.row_stream requires moe.enabled: the tables it serves are discovered by the "
                     "capture pass and fed by the eval callback, neither of which runs off the streaming path");
     }
+    // The dense-weights policy is applied when the streamer rebinds the non-expert weights. Off the
+    // streaming path nothing applies it, so the run would silently keep the plain mmap load.
+    if ((cfg.moe.dense_weights_set || cfg.moe.dense_weights != DenseWeightsMode::Anonymous) && !cfg.moe.enabled) {
+        return fail("moe.dense_weights requires moe.enabled: the policy is applied when the expert streamer "
+                    "rebinds the non-expert weights, and off the streaming path nothing applies it");
+    }
     if (cfg.moe.row_stream_mb < 0) {
         return fail("moe.row_stream_mb must be >= 0 (0 = the built-in window)");
     }

@@ -60,12 +60,13 @@ def main() -> None:
         "80",
         "--top-p",
         "0.95",
-        "--dense-weights",
-        "mmap",
         "--csv",
         str((args.out_dir / "metrics.csv").resolve()),
         *server_args,
     ]
+    # The dense-weights policy exists only under expert streaming; the server rejects it otherwise.
+    if "--moe-stream" in server_args and "--dense-weights" not in server_args:
+        command += ["--dense-weights", "mmap"]
 
     with log_path.open("w", encoding="utf-8") as log:
         env = os.environ.copy()

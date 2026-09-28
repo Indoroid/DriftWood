@@ -139,7 +139,7 @@ and majflt stays high with the dense set already anonymous.
 The cache policy above manages the *expert cache*. The other half of the war is the *dense*
 (non-expert)
 weights, whose policy is a single knob `--dense-weights mmap|warm|anon` (`DenseWeightsMode`, owned by
-`core/src/moe/dense_weights.h`). `mmap` leaves them file-backed (the kernel reclaims them by dropping
+`core/src/moe/dense_weights.h`). The expert streamer applies it, so the flag requires `--moe-stream`. `mmap` leaves them file-backed (the kernel reclaims them by dropping
 the pages, and a later touch demand-faults them 4 KiB at a time — the slow-start baseline); `warm`
 page-caches them once at load; `anon` (the default) reads each dense tensor once via O_DIRECT into an
 aligned anonymous buffer and rebinds the tensor onto it. A reclaim of anonymous memory swaps to zram

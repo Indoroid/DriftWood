@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `--dense-weights` (and its aliases `--no-warm-dense`, `--dense-odirect`) without `--moe-stream`
+  is now rejected by `meitte-cli` and `meitte-server`, like `--row-stream` and `--route-ahead`. The
+  expert streamer applies the policy, so the run used to accept the flag and keep the plain mmap
+  load. `MoeStreamConfig::dense_weights_set` records an explicit choice, because `anon` is also the
+  default; `validate()` rejects it, or any non-default mode, without `moe.enabled`.
+  `scripts/test-lfm25-server.py` passes `--dense-weights mmap` only with `--moe-stream`.
 - Audio on a projector without audio support now fails with "audio input requires a projector
   with audio support" and names what the projector supports. The audio decoder used to run with a
   sample rate of 0 and report "invalid audio input, sample rate, or byte limit". Images on a

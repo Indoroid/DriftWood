@@ -1246,7 +1246,7 @@ static void print_usage(const char * argv0) {
                 "      --row-stream       serve graph-row-gathered dense tables from flash\n"
                 "      --row-stream-mb N  row-stream resident window in MiB (default 64)\n"
                 "      --release-mmap     release the model-file mapping after a safe streamed load\n"
-                "      --dense-weights M  mmap|warm|anon|ahwb placement for non-expert weights\n"
+                "      --dense-weights M  mmap|warm|anon|ahwb placement for non-expert weights; needs --moe-stream\n"
                 "      [DEPRECATED] --dense-odirect maps to anon; --no-warm-dense maps to mmap\n"
                 "      --load-all         debug baseline: load every expert each token\n"
                 "      --force-cache      permit otherwise rejected pathological cache budgets\n"
@@ -1560,6 +1560,7 @@ int main(int argc, char ** argv) {
         else if (a == "--row-stream-mb")
             cfg.moe.row_stream_mb = std::atoi(next("--row-stream-mb"));
         else if (a == "--dense-weights") {
+            cfg.moe.dense_weights_set = true;
             const std::string m = next("--dense-weights");
             if (m == "mmap")
                 cfg.moe.dense_weights = DenseWeightsMode::Mmap;
@@ -1575,11 +1576,13 @@ int main(int argc, char ** argv) {
             }
         }
         // Deprecated meitte-cli aliases retained for command-line parity.
-        else if (a == "--no-warm-dense")
+        else if (a == "--no-warm-dense") {
             cfg.moe.dense_weights = DenseWeightsMode::Mmap;
-        else if (a == "--dense-odirect")
+            cfg.moe.dense_weights_set = true;
+        } else if (a == "--dense-odirect") {
             cfg.moe.dense_weights = DenseWeightsMode::Anonymous;
-        else if (a == "--load-all")
+            cfg.moe.dense_weights_set = true;
+        } else if (a == "--load-all")
             cfg.moe.load_all = true;
         else if (a == "--force-cache")
             cfg.moe.force_cache = true;

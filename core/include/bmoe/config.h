@@ -154,6 +154,10 @@ struct MoeStreamConfig {
     //             flash refault. The measured win on a model actively losing its dense set to reclaim,
     //             and the policy the Android app ships by default — the CLI matches it here.
     DenseWeightsMode dense_weights = DenseWeightsMode::Anonymous;
+    // True when the caller chose dense_weights itself (a frontend sets it for --dense-weights and its
+    // aliases). The default mode is also a valid choice, so the value alone cannot show it. Only the
+    // streamer applies the policy, so validate() rejects an explicit choice without moe.enabled.
+    bool dense_weights_set = false;
 
     // ── row-gathered dense tables served from flash (see bmoe/row_source.h) ──────────
     // A dense weight the graph only ever GATHERS ROWS from — a token embedding table is the pure
