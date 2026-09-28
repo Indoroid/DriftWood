@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- `--moe-stream` on a model without experts now fails with "expert streaming (--moe-stream) needs
+  a model with experts … use dense streaming (--dense-stream)". `Session::open` checks the GGUF
+  expert count before the recipe lookup, which used to ask for a new recipe in
+  `arch_registry.cpp`. `dense_gates` checks the message on the tiny dense models.
 - `--dense-weights` (and its aliases `--no-warm-dense`, `--dense-odirect`) without `--moe-stream`
   is now rejected by `meitte-cli` and `meitte-server`, like `--row-stream` and `--route-ahead`. The
   expert streamer applies the policy, so the run used to accept the flag and keep the plain mmap

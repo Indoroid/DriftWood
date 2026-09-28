@@ -97,8 +97,25 @@ static bool same(const std::vector<float> & a, const std::vector<float> & b) {
     return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
 }
 
+// Expert streaming on a model without experts must point at dense streaming. It used to report a
+// missing MoE recipe for the architecture, which no recipe could fix.
+static bool moe_stream_rejected(const char * path) {
+    SessionConfig cfg;
+    cfg.model_path = path;
+    cfg.n_ctx = 128;
+    cfg.moe.enabled = true;
+    std::string error;
+    auto session = Session::open(cfg, error);
+    if (session || error.find("--dense-stream") == std::string::npos) {
+        std::fprintf(stderr, "expert streaming on a dense model: %s\n", session ? "opened" : error.c_str());
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char ** argv) {
     if (argc != 2) return 2;
+    if (!moe_stream_rejected(argv[1])) return 1;
     for (int workers : {1, 2}) {
         Output baseline;
         if (!run_case(argv[1], workers, false, false, false, baseline)) return 1;

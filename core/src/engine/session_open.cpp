@@ -845,6 +845,12 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     // and the MTP experts — left at n_layer they are silently skipped and stay mmap-resident.
     const int n_layer_streamed = im.n_layer + (cfg.spec.is_mtp() ? im.n_layer_nextn : 0);
     MoeRecipe recipe{};
+    // A recipe maps expert tensors, so a model without experts has nothing a recipe could add.
+    if (cfg.moe.enabled && meta.info().ok && meta.info().n_expert <= 0) {
+        error = "expert streaming (--moe-stream) needs a model with experts, and this " + im.arch +
+                " model has none; use dense streaming (--dense-stream) to stream its weights";
+        return nullptr;
+    }
     if (cfg.moe.enabled && !resolve_stream_recipe(im.arch, n_layer_streamed, cfg.model_path, meta, recipe, error))
         return nullptr;
 
