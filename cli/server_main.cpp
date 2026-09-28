@@ -85,7 +85,8 @@ static constexpr size_t k_max_media_total_bytes = 64ull * 1024ull * 1024ull;
 static bool decode_base64_media(const std::string & encoded,
                                 const std::string & name,
                                 std::vector<MediaInput> & media,
-                                std::string & error) {
+                                std::string & error,
+                                MediaKind kind = MediaKind::Auto) {
     std::string decoded;
     try {
         decoded = base64::decode(encoded);
@@ -111,6 +112,7 @@ static bool decode_base64_media(const std::string & encoded,
 
     MediaInput input;
     input.name = name;
+    input.kind = kind;
     input.bytes.assign(reinterpret_cast<const std::uint8_t *>(decoded.data()),
                        reinterpret_cast<const std::uint8_t *>(decoded.data() + decoded.size()));
     media.push_back(std::move(input));
@@ -213,7 +215,9 @@ parse_message_content(const json & value, ChatMessage & message, std::vector<Med
             }
             const std::string format = audio->value("format", "audio");
             const size_t media_index = media.size();
-            if (!decode_base64_media((*audio)["data"].get<std::string>(), "audio/" + format, media, error))
+            // The part type says audio, so the engine can check the projector before decoding.
+            if (!decode_base64_media((*audio)["data"].get<std::string>(), "audio/" + format, media, error,
+                                     MediaKind::Audio))
                 return false;
             ChatContentPart content;
             content.kind = ChatContentKind::Media;

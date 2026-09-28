@@ -43,6 +43,15 @@ void MtmdRuntime::reset() {
 const char * MtmdRuntime::marker() const {
     return ctx_ ? mtmd_get_marker(ctx_.get()) : mtmd_default_marker();
 }
+std::string MtmdRuntime::projector_capability_error(bool audio) const {
+    const bool vision_ok = mtmd_support_vision(ctx_.get());
+    const bool audio_ok = mtmd_support_audio(ctx_.get());
+    if (audio ? audio_ok : vision_ok) return {};
+    const char * has = vision_ok ? "vision only" : audio_ok ? "audio only" : "neither vision nor audio";
+    return std::string(audio ? "audio input requires a projector with audio support"
+                             : "image input requires a projector with vision support") +
+           "; the loaded projector supports " + has;
+}
 
 namespace {
 struct VideoInput {
@@ -130,6 +139,12 @@ bool MtmdRuntime::prepare(const std::string & prompt,
             bitmap_kinds.push_back(kind);
             out.video_owners.push_back(std::move(video));
         } else {
+            // Reject a declared kind the projector cannot encode before any decoder runs. Otherwise
+            // the audio decoder gets a sample rate of 0 and reports an invalid input.
+            if (kind == MediaKind::Audio || kind == MediaKind::Image) {
+                error = projector_capability_error(kind == MediaKind::Audio);
+                if (!error.empty()) return false;
+            }
             auto decoded = mtmd_helper_bitmap_init_from_buf(ctx_.get(), input.bytes.data(), input.bytes.size(), false,
                                                             mtmd_helper_init_opt_default());
             if (decoded.video_ctx) mtmd_helper_video_free(decoded.video_ctx);
@@ -145,6 +160,9 @@ bool MtmdRuntime::prepare(const std::string & prompt,
                 return false;
             }
             out.bitmaps.entries.emplace_back(decoded.bitmap);
+            // An Auto input is known only after decoding. The bitmap is owned by out.bitmaps now.
+            error = projector_capability_error(mtmd_bitmap_is_audio(decoded.bitmap));
+            if (!error.empty()) return false;
             bitmap_kinds.push_back(kind);
             size_t size = mtmd_bitmap_get_n_bytes(decoded.bitmap);
             if (size > cfg_.media_max_bytes - *decoded_bytes) {

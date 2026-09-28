@@ -62,6 +62,10 @@ public:
                               const std::function<bool()> & cancelled = {});
 
 private:
+    // Empty when the projector can encode the input; otherwise the error that names the missing
+    // capability. Requires ctx_.
+    std::string projector_capability_error(bool audio) const;
+
     mtmd::context_ptr ctx_{nullptr};
     MultimodalConfig cfg_;
 };

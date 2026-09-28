@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Audio on a projector without audio support now fails with "audio input requires a projector
+  with audio support" and names what the projector supports. The audio decoder used to run with a
+  sample rate of 0 and report "invalid audio input, sample rate, or byte limit". Images on a
+  projector without vision support are checked the same way. `meitte-server` now marks
+  `input_audio` parts as audio, so it reports the same error instead of "failed to decode
+  image/audio". `tests/media_capability_test.cpp` runs when `BMOE_TEST_MM_MODEL` and
+  `BMOE_TEST_MMPROJ` are configured.
 - Fix `--mtp` aborting inside llama.cpp on every MTP model: the pinned llama.cpp loads the nextn
   tensors only when `llama_model_params::load_mtp` is set, which the engine never did. Verified on
   Qwen3.6-35B-A3B (UD-IQ1_M): 82 % draft acceptance, streamed output identical to resident.

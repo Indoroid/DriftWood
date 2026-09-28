@@ -13,6 +13,9 @@ build/cli/meitte-cli -m model.gguf --mmproj mmproj.gguf \
 
 - `--image PATH`, `--audio PATH`, and the format-detecting `--media PATH` alias are repeatable.
 - Projector work is CPU-only. `--mmproj-offload` is rejected.
+- The projector must support the input: audio needs an audio-capable projector, images and video a
+  vision-capable one. Otherwise the request fails before decoding with an error that names the
+  missing capability (for example, audio on a vision-only projector).
 - `--image-min-tokens` and `--image-max-tokens` override dynamic image-token bounds; `-1`
   retains projector metadata.
 - `--mtmd-batch-max-tokens N` limits projector output per prefill batch.
