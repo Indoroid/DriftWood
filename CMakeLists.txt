@@ -37,8 +37,8 @@ option(BMOE_BUILD_TOOLS "Build standalone diagnostic tools (bmoe-iobench)" OFF)
 # reasoning-budget sampler, so prompt formatting, thinking extraction, and budget end markers are
 # template-driven per model instead of hardcoded. Unlike the streaming seam, `common` is NOT a
 # stable API — it can change between upstream versions, so a submodule bump may need the chat glue
-# in runtime.cpp updated (the
-# gates catch it at build time). That trade-off is deliberate; see docs/seam.md.
+# in core/src/engine (session_*.cpp, chat_render.cpp, chat_parse.cpp) updated (the gates catch it
+# at build time). That trade-off is deliberate; see docs/seam.md.
 set(BMOE_HAVE_LLAMA OFF)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/llama.cpp/CMakeLists.txt")
     set(BMOE_HAVE_LLAMA ON)

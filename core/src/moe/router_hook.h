@@ -41,7 +41,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -66,14 +65,11 @@ public:
     const std::vector<LayerExperts> & captured() const { return captured_; }
     std::vector<LayerExperts> & captured() { return captured_; }
 
-    // After capture, the non-expert weight LEAVES seen in the graph, keyed by tensor name. These
-    // are the persistent model weights the streamer leaves mmap-resident (embeddings, attention,
-    // norms, lm_head); the --dense-weights anon policy rebinds them onto O_DIRECT buffers. The map
-    // also holds graph inputs and KV tensors (same op-NONE leaf shape); the runtime filters it
-    // against the gguf tensor set, which those do not belong to. Only .tensor is meaningful here.
-    const std::unordered_map<std::string, ggml_tensor *> & captured_weights() const { return captured_weights_; }
-
-    // Every distinct captured leaf object. A name map cannot represent tied tensors that share a
+    // After capture, every distinct non-expert weight LEAF object seen in the graph. These are the
+    // persistent model weights the streamer leaves mmap-resident (embeddings, attention, norms,
+    // lm_head); the --dense-weights anon policy rebinds them onto O_DIRECT buffers. The list also
+    // holds graph inputs and KV tensors (same op-NONE leaf shape); the runtime filters it against
+    // the gguf tensor set, which those do not belong to. Objects, not names: tied tensors share a
     // name and file range, but each object must be rebound before its mapping can be released.
     const std::vector<ggml_tensor *> & captured_weight_objects() const { return captured_weight_objects_; }
     const std::unordered_set<std::string> & captured_matrix_weights() const { return matrix_weights_; }
@@ -300,7 +296,6 @@ private:
     IRowSource * row_source_ = nullptr; // row-gathered dense tables, when the policy is on
     std::atomic<bool> fatal_{false};
     std::vector<LayerExperts> captured_;
-    std::unordered_map<std::string, ggml_tensor *> captured_weights_;
     std::vector<ggml_tensor *> captured_weight_objects_;
     std::unordered_set<const ggml_tensor *> captured_weight_seen_;
     std::unordered_set<std::string> matrix_weights_;
@@ -312,7 +307,7 @@ private:
     // Capture-time evidence for row_gathered_weights(): every weight seen as the TABLE of a row
     // gather, and every weight seen in any way that rules that out. The verdict is the difference.
     std::unordered_set<std::string> row_gathered_;
-    std::unordered_set<std::string> row_disqualified_; // non-expert weight leaves (see captured_weights)
+    std::unordered_set<std::string> row_disqualified_; // non-expert weight leaves (see captured_weight_objects)
     std::unordered_set<std::string> row_computed_index_;
     bool row_computed_indices_ = false;
     std::vector<int32_t> gathered_; // reused scratch for stream-mode id gather

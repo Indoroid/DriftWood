@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace meitte {
@@ -67,5 +68,27 @@ struct GgufMeta {
     bool ok = false; // both parses' ok, from the single underlying open
 };
 GgufMeta read_gguf_meta(const char * path);
+
+// read_gguf_meta() at most once, on first use. Opening a session asks the header several
+// conditional questions (a top-k override, the streamer's offsets, the run info); one parse
+// serves all of them, and a caller that asks none pays nothing.
+class LazyGgufMeta {
+public:
+    explicit LazyGgufMeta(std::string path) : path_(std::move(path)) {}
+    const GgufOffsets & offsets() { return get().offsets; }
+    const GgufModelInfo & info() { return get().info; }
+
+private:
+    const GgufMeta & get() {
+        if (!read_) {
+            meta_ = read_gguf_meta(path_.c_str());
+            read_ = true;
+        }
+        return meta_;
+    }
+    std::string path_;
+    GgufMeta meta_;
+    bool read_ = false;
+};
 
 } // namespace meitte

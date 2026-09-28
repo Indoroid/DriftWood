@@ -1,6 +1,7 @@
 #include "expert_stream_source.h"
 
 #include "row_stream.h"
+#include "../io/platform_io.h"
 
 #include "ggml.h"
 #ifdef BMOE_HAVE_EXPERT_READY_HOOK
@@ -13,10 +14,6 @@
 #include <cstring>
 #include <thread>
 #include <utility>
-
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#include <intrin.h> // _mm_pause for the readiness spin-wait
-#endif
 
 namespace meitte {
 
@@ -1304,22 +1301,6 @@ void ExpertStreamSource::c_expert_ready(const ggml_tensor * src0, int expert, vo
     static_cast<ExpertStreamSource *>(user_data)->on_expert_ready(src0, expert);
 }
 
-// One idle beat of the spin-wait below: keep the core out of the sibling threads' way without
-// entering the scheduler. yield() is a syscall; these are single instructions.
-static inline void cpu_relax() {
-#if defined(__aarch64__)
-    __asm__ __volatile__("isb" ::: "memory");
-#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
-#if defined(_MSC_VER)
-    _mm_pause();
-#else
-    __builtin_ia32_pause();
-#endif
-#else
-    std::this_thread::yield();
-#endif
-}
-
 // Called from EVERY compute thread, for each routed expert, before it reads that expert's rows.
 // Blocks until the expert's slice for the layer in flight is resident (or the run goes fatal).
 void ExpertStreamSource::on_expert_ready(const ggml_tensor * src0, int expert) {
@@ -1357,7 +1338,7 @@ void ExpertStreamSource::on_expert_ready(const ggml_tensor * src0, int expert) {
             stall_union_.exit();
             return;
         }
-        cpu_relax();
+        pio::cpu_relax();
     }
     // Register as a waiter BEFORE the last look at the flag. The publisher sets the flag before it
     // reads this count, and both sides are seq_cst, so one of the two must observe the other: either

@@ -75,9 +75,9 @@ static const MoeRecipe k_recipes[] = {
     // non-expert weight. That makes the streamed fraction of this architecture unusually low —
     // see docs/limitations.md.
     {"qwen4exp", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
-    {"cohere2moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"cohere2moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}, /*fused_gate_up_alt*/ true},
     {"hunyuan-moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
-    {"hy_v3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    {"hy_v3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}, /*fused_gate_up_alt*/ true},
     {"hy_v4", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
     {"minimax-m3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
     {"mimo2", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
@@ -95,6 +95,28 @@ const MoeRecipe * find_moe_recipe(const char * arch) {
         }
     }
     return nullptr;
+}
+
+bool resolve_moe_recipe(const MoeRecipe & recipe,
+                        int n_layer,
+                        const std::function<bool(const std::string &)> & has_tensor,
+                        MoeRecipe & out) {
+    out = recipe;
+    if (!recipe.fused_gate_up_alt) return true;
+    bool fused = false;
+    bool split = false;
+    for (int il = 0; il < n_layer; ++il) {
+        const std::string layer = "blk." + std::to_string(il) + ".";
+        fused |= has_tensor(layer + "ffn_gate_up_exps.weight");
+        split |= has_tensor(layer + "ffn_gate_exps.weight");
+    }
+    if (fused && split) return false;
+    if (fused) {
+        out.exps_suffix[0] = "ffn_gate_up_exps";
+        out.exps_suffix[1] = "ffn_down_exps";
+        out.exps_suffix[2] = nullptr;
+    }
+    return true;
 }
 
 int n_moe_recipes() {

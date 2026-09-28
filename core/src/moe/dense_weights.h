@@ -85,7 +85,6 @@ public:
     // The row policy, once init has run: null when no table qualified or the takeover failed. The
     // engine's graph adapter needs it to make rows present before a gather node runs.
     IRowSource * row_source() const;
-    bool file_mapping_in_use() const;
     bool reopen_readers();
     RowSourceStats row_stats() const;
 

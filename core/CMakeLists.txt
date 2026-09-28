@@ -34,28 +34,54 @@ endif()
 target_compile_definitions(bmoe_core PUBLIC BMOE_VERSION="${PROJECT_VERSION}")
 
 if(BMOE_HAVE_LLAMA)
-    target_sources(bmoe_core PRIVATE
+    # One list per layer (see docs/architecture.md). Dependencies point inward: engine/ composes
+    # moe/, io/, multimodal/ and metrics/; io/ depends on nothing else in the tree.
+    set(_bmoe_io_sources
         src/io/platform_io.cpp
         src/io/file_reader.cpp
         src/io/mapping_release.cpp
+        src/io/subprocess.cpp
+    )
+    set(_bmoe_moe_sources
         src/moe/dense_weights.cpp
         src/moe/dense_stream.cpp
         src/moe/row_stream.cpp
         src/moe/gguf_offsets.cpp
         src/moe/expert_stream_source.cpp
         src/moe/router_hook.cpp
+        src/moe/router_policy.cpp
+        src/moe/router_predict.cpp
+    )
+    set(_bmoe_engine_sources
+        src/engine/llama_glue.cpp
         src/engine/tensor_overrides.cpp
-        src/engine/session.cpp
         src/engine/chat_parse.cpp
+        src/engine/chat_render.cpp
         src/engine/thinking_control.cpp
+        src/engine/session.cpp
+        src/engine/session_open.cpp
+        src/engine/session_generate.cpp
+        src/engine/session_perplexity.cpp
+        src/engine/session_context.cpp
         src/engine/runtime.cpp
         src/engine/c_api.cpp
+    )
+    set(_bmoe_multimodal_sources
         src/multimodal/mtmd_runtime.cpp
         src/multimodal/media_io.cpp
         src/multimodal/audio_convert.cpp
+    )
+    set(_bmoe_metrics_sources
         src/metrics/csv_metrics_sink.cpp
         src/metrics/route_trace_sink.cpp
         src/metrics/decode_trace_sink.cpp
+    )
+    target_sources(bmoe_core PRIVATE
+        ${_bmoe_io_sources}
+        ${_bmoe_moe_sources}
+        ${_bmoe_engine_sources}
+        ${_bmoe_multimodal_sources}
+        ${_bmoe_metrics_sources}
     )
     # `llama` is the stable public API the streaming seam uses. `llama-common` (llama.cpp's
     # `common` utils) is linked only for chat-template rendering, reasoning parsing, and its

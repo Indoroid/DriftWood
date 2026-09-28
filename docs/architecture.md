@@ -19,17 +19,27 @@ core/
     metrics.h       TokenMetrics / RunSummary + IMetricsSink
     runtime.h       run() entry point
   src/
-    io/         platform_io — O_DIRECT reads + reserve/commit/evict VM, cross-platform
+    io/         the platform layer — every OS conditional in core/ lives here
+                platform_io — O_DIRECT reads + reserve/commit/evict VM, CPU spin hint
                 file_reader — pooled positioned reader, per-consumer O_DIRECT
                 mapping_release — safe model-file unmap and teardown placeholders
+                subprocess — run a helper program and capture its output (FFmpeg audio)
     moe/        gguf_offsets (tensor → (shard, offset), split ggufs included), arch_registry,
-                expert_stream_source (one reader per shard), router_hook
+                expert_stream_source (one reader per shard)
+                router_hook — capture, eval-callback dispatch, route/compute traces
+                router_policy — cache-aware dropping and substitution
+                router_predict — next-layer prediction, its probe, route-ahead
                 dense_weights — non-expert weight policy + the residency sensor
                 dense_stream — bounded stable-address matrix windows for dense models
                 row_stream - row-gathered tables served from flash (see row-gathered-tables.md)
-    engine/     session — composition + the generation loop (open/generate/close)
+    engine/     session — the Session pimpl; state in session_impl.h, split by phase:
+                  session_open (load, contexts, capture, binding), session_generate (prefill +
+                  decode/speculation loop), session_perplexity, session_context (growth,
+                  summarization, MTP draft context)
                 runtime — the one-shot run() wrapper over a Session
                 c_api — stable opaque handles for C and FFI callers
+                llama_glue — enum mapping, batches, tokenization, sampler chain (llama.h only)
+                chat_render — request messages/tools ↔ chat template inputs (llama.cpp `common`)
                 chat_parse — reasoning-parser wiring (llama.cpp `common`, see seam.md)
                 thinking_control — how "thinking off" is honoured, probed per model
     multimodal/ mtmd projector adapter + bounded file, FFmpeg audio, and sampled-video input
@@ -96,7 +106,7 @@ waits per matrix during compute.
 
 ## The generation loop
 
-The composition root is `Session` (core/src/engine/session.cpp):
+The composition root is `Session` (core/src/engine/session_*.cpp):
 
 1. `open()` — load model (mmap on, repack off, experts on CPU); if streaming, resolve the
    architecture recipe, install the router hook, do the capture warm-up, bind the expert

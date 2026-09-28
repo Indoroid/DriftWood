@@ -141,7 +141,7 @@ point is public, not a divergence we intend to maintain.
 
 ## The chat glue: llama.cpp `common` (not the streaming seam)
 
-Separate from the two streaming hooks above, `session.cpp` links llama.cpp's `common`
+Separate from the two streaming hooks above, the session (`core/src/engine/session_*.cpp`) links llama.cpp's `common`
 library for two things: rendering the model's own chat template and parsing reasoning output, and
 (with `--mtp`) driving speculative decoding.
 `common_chat_templates_init` / `common_chat_templates_apply` run the real Jinja template the
@@ -205,7 +205,7 @@ speculative API would remove this restriction.
 
 Unlike the public-C-API streaming seam, `common` is **not a stable API** — it can change
 between upstream versions. So a submodule bump may require updating this chat glue in
-`session.cpp` / `chat_parse.cpp` / `thinking_control.cpp`; the build and gates catch a break at
+`session_*.cpp` / `chat_render.cpp` / `chat_parse.cpp` / `thinking_control.cpp`; the build and gates catch a break at
 compile time rather than at runtime (`tests/chat_parse_test.cpp` and
 `tests/think_control_test.cpp` cover these seams directly). This
 trade-off is deliberate and is also noted at the link site in the root `CMakeLists.txt`. The

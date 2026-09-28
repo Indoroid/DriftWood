@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+- Split the engine session into focused units behind one shared `Session::Impl`
+  (`session_open`, `session_generate`, `session_perplexity`, `session_context`), with the
+  llama.h adapters in `llama_glue`, chat request rendering in `chat_render`, and per-phase
+  accounting in `run_tally.h`. `Session::open()` now runs as named phases.
+- Split `router_hook.cpp` into capture/dispatch (`router_hook`), the lossy routing policies
+  (`router_policy`) and prediction/route-ahead (`router_predict`).
+- Move the remaining OS-specific code in `core/` into the `io/` platform layer: FFmpeg
+  capture goes through `pio::run_capture`, the readiness spin-wait through `pio::cpu_relax`.
+- Replace the architecture-name check for Cohere2MoE / HY V3 expert layouts with a recipe flag
+  (`MoeRecipe::fused_gate_up_alt`) and a unit-tested `resolve_moe_recipe`.
+- Contexts rebuilt for context growth or summarization now use the session's full abort
+  predicate, so a fatal streaming I/O error stops them as it stops the original context.
+- Remove unused code: `RouterHook::captured_weights()` and `DenseWeights::file_mapping_in_use()`.
+
 ## [0.24.0] - 2026-09-24
 
 - Add bounded CPU dense-matrix streaming for zero-expert GGUF models, with serial

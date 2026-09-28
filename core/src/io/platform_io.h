@@ -17,7 +17,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <thread>
 #include <vector>
+
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h> // _mm_pause
+#endif
 
 namespace meitte::pio {
 
@@ -28,6 +33,22 @@ using fd_t = int;
 #endif
 
 extern const fd_t fd_invalid;
+
+// One idle beat of a spin-wait: keep the core out of the sibling threads' way without entering the
+// scheduler. yield() is a syscall; the architecture hints are single instructions.
+inline void cpu_relax() {
+#if defined(__aarch64__)
+    __asm__ __volatile__("isb" ::: "memory");
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#if defined(_MSC_VER)
+    _mm_pause();
+#else
+    __builtin_ia32_pause();
+#endif
+#else
+    std::this_thread::yield();
+#endif
+}
 bool fd_ok(fd_t fd);
 
 // Open path for positioned reads. When direct is true, request cache-bypassing I/O — O_DIRECT on
