@@ -38,8 +38,16 @@ PplResult Session::perplexity(const PplRequest & req) {
     }
     r.n_tokens = n;
 
-    llama_memory_clear(llama_get_memory(ctx), true);
-    im.kv_tokens.clear();
+    // Scoring needs the context from position 0, so the conversation ends here: every return path
+    // below leaves the session as a new chat does (see PplRequest) — no scored text in the KV, no
+    // stale history, media or draft positions for a later clear_kv=false turn to build on. An
+    // isolated context would keep the conversation, but it would reserve a second KV and compute
+    // buffers, and on this engine that memory comes out of the expert cache.
+    im.reset_conversation();
+    struct ResetOnExit {
+        Session::Impl & im;
+        ~ResetOnExit() { im.reset_conversation(); }
+    } reset_on_exit{im};
 
     // Warm-up graph, discarded. Both routing policies decide at the terminal node of each layer's
     // weight chain, and which node that is gets LEARNED from the first graph of a run — so on a
@@ -140,9 +148,8 @@ PplResult Session::perplexity(const PplRequest & req) {
         const LogSoftmax norm(lg, im.n_vocab);
         const double lse = (double) norm.max + norm.log_sum;
         for (const std::string & c : req.choices) {
-            llama_token ct[8];
-            const int nc = llama_tokenize(im.vocab, c.c_str(), (int) c.size(), ct, 8, false, false);
-            if (nc < 1) {
+            std::vector<llama_token> ct;
+            if (tokenize(im.vocab, c, /*add_special*/ false, /*parse_special*/ false, ct) < 1) {
                 r.error = "choice '" + c + "' does not tokenize";
                 return r;
             }

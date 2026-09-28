@@ -299,7 +299,10 @@ public:
     // when the cache is off. The only way the budget moves after init sizes it.
     void set_cache_budget_mb(int mib);
 
-    // Score a fixed text under teacher forcing. Clears the KV; leaves no conversation state behind.
+    // Score a fixed text under teacher forcing on the live context, so routing policies and the warm
+    // expert cache behave as in generation. It ends the conversation: on return the session is in the
+    // state of a new chat (KV, history, retained media, draft context and sampler reset), whether
+    // scoring succeeded or failed. A request rejected before scoring starts changes nothing.
     PplResult perplexity(const PplRequest & req);
 
     // Owned copy of the last computed logits row for exact identity checks. Empty if no row exists.

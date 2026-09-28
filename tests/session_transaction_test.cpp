@@ -133,6 +133,32 @@ int main(int argc, char ** argv) {
         check(s->generate(turn("more", false)).ok, "conversation continues after the full rebuild");
     }
 
+    // Perplexity ends the conversation (PplRequest): a continued turn afterwards is a first turn, not
+    // a turn decoded after the scored text or after a history the KV no longer holds.
+    {
+        std::vector<float> fresh_logits;
+        std::string fresh;
+        {
+            auto s = open_session(model, 0.0f);
+            auto r = s->generate(turn("and then", true));
+            fresh = r.generated_text;
+            fresh_logits = s->copy_logits();
+        }
+        auto s = open_session(model, 0.0f);
+        check(s->generate(turn("hello there", true)).ok, "turn before perplexity");
+        meitte::PplRequest ppl;
+        ppl.text = "the quick brown fox jumps over the lazy dog";
+        ppl.skip = 1;
+        check(s->perplexity(ppl).ok, "perplexity between turns");
+        auto r = s->generate(turn("and then", false));
+        check(r.ok && r.generated_text == fresh && s->copy_logits() == fresh_logits,
+              "turn after perplexity starts a new conversation");
+        ppl.text = ""; // too short: rejected before any state changes
+        check(!s->perplexity(ppl).ok, "rejected perplexity request");
+        r = s->generate(turn("more", false));
+        check(r.ok, "conversation continues after a rejected perplexity request");
+    }
+
     // Sampling: the session sampler's RNG is part of the turn transaction, and a request-local
     // override neither replaces nor advances it.
     {

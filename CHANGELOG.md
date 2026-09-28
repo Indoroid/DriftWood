@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Make `Session::perplexity()` leave the session in the documented new-chat state on every return
+  path. It cleared the KV and `kv_tokens` but kept the chat history, retained media, draft context
+  and the scored text in the KV, so a following `clear_kv=false` turn decoded after the scored text.
+  Multiple-choice scoring now accepts choices longer than eight tokens (only the first is scored).
 - Make reasoning-token accounting match the documented contract: with a reasoning budget, tokens in
   the reasoning span (up to the budget plus the forced end sequence) no longer consume `n_predict`,
   which previously counted every token. Without a budget, `n_predict` still bounds the whole
