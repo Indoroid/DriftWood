@@ -540,7 +540,7 @@ BMOE_READY {"load_s":<float>,"arch":"<string>","n_ctx":<int>,
             "n_expert_used":<int>}  # once, after the model loads
 BMOE_BEGIN {"id":<int>}                                                # a generation started
 BMOE_LOAD / BMOE_PROGRESS ...                                          # per token, as above
-BMOE_DONE  {"id":<int>,"cancelled":<bool>,"tokens":<int>,"tok_s":<float>,
+BMOE_DONE  {"id":<int>,"cancelled":<bool>,"finish":"<reason>","tokens":<int>,"tok_s":<float>,
             "prefill_s":<float>,"prefill_tps":<float>,"load_s":<float>,"cache_hit_pct":<float>,
             "n_prompt":<int>,"n_past":<int>,"compute_s_tok":<float>,"io_s_tok":<float>,
             "cache_resident_mib":<float>,"cache_budget_mib":<float>,"read_mib":<float>,
@@ -616,9 +616,11 @@ AVERAGES over the run (so a UI can show an average compute-vs-I/O split, not jus
 `cache_resident_mib`/`cache_budget_mib` track the MoE cache. `read_mib` and
 `stall_s_tok`/`mgmt_s_tok` report MoE reads and overlap cost; dense runs use the separate
 `dense_read_mib`/`dense_wait_s` fields. `text` is the final answer and `reasoning` the final thinking span (empty
-unless the model reasoned), same split as the per-token lines. `BMOE_ERROR` with `fatal:false` is a rejected
-request (e.g. the prompt plus `n_predict` exceeds `n_ctx`) and leaves the session usable;
-`fatal:true` means the process is ending.
+unless the model reasoned), same split as the per-token lines. `finish` is the engine's reason the
+generation ended: `stop`, `length`, `cancelled` or `context_full`. `BMOE_ERROR` with `fatal:false`
+is a failed request that the engine rolled back (an invalid request, a prompt plus `n_predict`
+over `n_ctx`, a decode failure) and leaves the session usable; `fatal:true` is a streaming I/O
+failure the session cannot recover from, and means the process is ending.
 
 For dense mode, `dense_read_mib`, `dense_io_s` and `dense_wait_s` cover decode only; the existing
 `prefill_read_mib`, `prefill_io_s` and `prefill_stall_s` cover prompt evaluation. Prefill and decode

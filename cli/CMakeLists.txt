@@ -1,4 +1,6 @@
-add_library(bmoe_cli_protocol STATIC session_protocol.cpp)
+# Shared by both frontends and their host tests: the session line protocol and the helpers both
+# protocols use (frontend_util). libmeitte never links it.
+add_library(bmoe_cli_protocol STATIC session_protocol.cpp frontend_util.cpp)
 target_link_libraries(bmoe_cli_protocol PUBLIC bmoe_core)
 target_include_directories(bmoe_cli_protocol PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -30,7 +32,7 @@ endif()
 # Windows CLI build green until the transport is moved onto llama.cpp's cross-platform httplib.
 if(UNIX)
     add_executable(meitte-server server_main.cpp)
-    target_link_libraries(meitte-server PRIVATE bmoe_core)
+    target_link_libraries(meitte-server PRIVATE bmoe_core bmoe_cli_protocol)
 
     # llama.cpp emits its shared libraries under build/bin while this executable lives under
     # build/cli. CMake's default build RPATH is an absolute path, which breaks as soon as a build

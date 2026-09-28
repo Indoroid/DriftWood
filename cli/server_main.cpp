@@ -23,6 +23,7 @@
 #include "bmoe/runtime.h"
 #include "bmoe/session.h"
 #include "bmoe/version.h"
+#include "frontend_util.h"
 #include "base64.hpp"
 #include "nlohmann/json.hpp"
 
@@ -53,63 +54,15 @@
 
 using namespace meitte;
 using json = nlohmann::json;
+using frontend::emit_progress_line;
+using frontend::json_escape;
+using frontend::normalize_reasoning_effort;
+using frontend::ProgressDelta;
+using frontend::read_text_file;
 
 // ── Socket helpers ───────────────────────────────────────────────────────────
 
 // ── Minimal JSON utilities ───────────────────────────────────────────────────
-
-static std::string json_escape(const std::string & s) {
-    std::string quoted = json(s).dump(-1, ' ', false, json::error_handler_t::replace);
-    return quoted.size() >= 2 ? quoted.substr(1, quoted.size() - 2) : std::string{};
-}
-
-static bool read_text_file(const std::string & path, std::string & out, std::string & error) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        error = "cannot read " + path;
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    return true;
-}
-
-static std::string normalize_reasoning_effort(std::string value) {
-    std::string lower = value;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower == "low" || lower == "medium" || lower == "high" || lower == "none") return lower;
-    return value;
-}
-
-struct ProgressDelta {
-    std::string reasoning;
-    std::string text;
-};
-
-static bool is_extension(const std::string & full, const std::string & previous) {
-    return full.size() >= previous.size() && full.compare(0, previous.size(), previous) == 0;
-}
-
-// Byte-compatible with meitte-cli --progress so existing telemetry consumers can observe an HTTP
-// generation without learning another format. One ProgressDelta lives per request.
-static void emit_progress_line(const TokenMetrics & m, ProgressDelta & state) {
-    if (m.read_bytes || m.io_ms > 0.0)
-        std::printf("BMOE_LOAD {\"mb\":%.2f,\"ms\":%.1f}\n", m.read_bytes / (1024.0 * 1024.0), m.io_ms);
-    const bool extension = is_extension(m.reasoning, state.reasoning) && is_extension(m.text, state.text);
-    const std::string reasoning = extension ? m.reasoning.substr(state.reasoning.size()) : m.reasoning;
-    const std::string text = extension ? m.text.substr(state.text.size()) : m.text;
-    std::printf("BMOE_PROGRESS {\"step\":%d,\"steps\":%d,\"wall_ms\":%.1f,\"io_ms\":%.1f,"
-                "\"compute_ms\":%.1f,\"mgmt_ms\":%.1f,\"stall_ms\":%.1f,\"read_mb\":%.2f,"
-                "\"cache_hit_pct\":%.1f,\"majflt\":%llu,\"cpu_ms\":%.1f,\"dense_resident_frac\":%.3f,"
-                "%s\"delta_reasoning\":\"%s\",\"delta_text\":\"%s\"}\n",
-                m.step, m.steps, m.wall_ms, m.io_ms, m.compute_ms, m.mgmt_ms, m.stall_ms,
-                m.read_bytes / (1024.0 * 1024.0), m.cache_hit_pct, (unsigned long long) m.majflt, m.cpu_ms,
-                m.dense_resident_frac, extension ? "" : "\"reset\":1,", json_escape(reasoning).c_str(),
-                json_escape(text).c_str());
-    state.reasoning = m.reasoning;
-    state.text = m.text;
-    std::fflush(stdout);
-}
 
 static size_t json_find_key(const std::string & json, const char * key) {
     std::string pat = std::string("\"") + key + "\"";
@@ -502,37 +455,10 @@ parse_message_content(const json & value, ChatMessage & message, std::vector<Med
 }
 
 static bool parse_chat_template_kwargs(const json & value, ApiCompletionRequest & out, std::string & error) {
-    if (!value.is_object()) {
-        error = "chat_template_kwargs must be an object";
-        return false;
-    }
     std::optional<bool> generic_think;
     std::optional<std::string> generic_effort;
-    for (auto it = value.begin(); it != value.end(); ++it) {
-        if (it.key().empty() || it.key().size() > 128) {
-            error = "chat_template_kwargs keys must be 1..128 bytes";
-            return false;
-        }
-        if (it.key() == "enable_thinking") {
-            if (!it.value().is_boolean()) {
-                error = "chat_template_kwargs.enable_thinking must be a boolean";
-                return false;
-            }
-            generic_think = it.value().get<bool>();
-        } else if (it.key() == "reasoning_effort") {
-            if (!it.value().is_string()) {
-                error = "chat_template_kwargs.reasoning_effort must be a string";
-                return false;
-            }
-            generic_effort = normalize_reasoning_effort(it.value().get<std::string>());
-            if (generic_effort->empty()) {
-                error = "chat_template_kwargs.reasoning_effort must be non-empty";
-                return false;
-            }
-        } else {
-            out.chat_template_kwargs[it.key()] = it.value().dump();
-        }
-    }
+    if (!frontend::parse_template_kwargs(value, out.chat_template_kwargs, generic_think, generic_effort, error))
+        return false;
     if (generic_think) {
         if (out.think && *out.think != *generic_think) {
             error = "Conflicting thinking controls: think and chat_template_kwargs.enable_thinking disagree";
@@ -1042,9 +968,11 @@ static json completion_usage(const RunResult & result) {
             {"total_tokens", result.summary.n_prompt + result.summary.n_generated}};
 }
 
-static const char * completion_finish_reason(const RunResult & result, int n_predict) {
+// OpenAI's finish_reason, from the engine's. A token count cannot give it: under a reasoning budget
+// more than n_predict tokens are generated without the answer running out.
+static const char * completion_finish_reason(const RunResult & result) {
     if (!result.tool_calls.empty()) return "tool_calls";
-    return result.summary.n_generated >= n_predict ? "length" : "stop";
+    return result.finish == FinishReason::Length || result.finish == FinishReason::ContextFull ? "length" : "stop";
 }
 
 static json make_stream_usage(const std::string & id,
@@ -1225,7 +1153,8 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
     if (!api.stream) {
         auto result = state.session->generate(greq, progress_callback, state.metrics);
         if (!result) {
-            send_json_error(fd, 500, result.error.c_str(), false);
+            // A rejected request is the client's to fix; anything else failed in the engine.
+            send_json_error(fd, result.rejected ? 400 : 500, result.error.c_str(), false);
             return;
         }
         if (state.srv_cfg.kv_preserve && !result.cancelled) state.kv_preserve_started = true;
@@ -1249,12 +1178,12 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
             }
             choice = {{"index", 0},
                       {"message", std::move(message)},
-                      {"finish_reason", completion_finish_reason(result, greq.n_predict)},
+                      {"finish_reason", completion_finish_reason(result)},
                       {"logprobs", nullptr}};
         } else {
             choice = {{"text", result.generated_text},
                       {"index", 0},
-                      {"finish_reason", completion_finish_reason(result, greq.n_predict)},
+                      {"finish_reason", completion_finish_reason(result)},
                       {"logprobs", nullptr}};
         }
         const json body = {{"id", id_prefix + "-" + request_tag},
@@ -1335,8 +1264,7 @@ static void handle_completions(int fd, const HttpRequest & req, ServerState & st
             }
         }
 
-        json choice = {
-            {"index", 0}, {"finish_reason", completion_finish_reason(result, greq.n_predict)}, {"logprobs", nullptr}};
+        json choice = {{"index", 0}, {"finish_reason", completion_finish_reason(result)}, {"logprobs", nullptr}};
         if (chat)
             choice["delta"] = json::object();
         else {

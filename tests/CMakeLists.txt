@@ -95,7 +95,7 @@ add_test(NAME ngram_draft COMMAND bmoe_ngram_test)
 
 if(UNIX AND BMOE_BUILD_CLI)
     add_executable(bmoe_server_api_test server_api_test.cpp)
-    target_link_libraries(bmoe_server_api_test PRIVATE bmoe_core)
+    target_link_libraries(bmoe_server_api_test PRIVATE bmoe_core bmoe_cli_protocol)
     add_test(NAME server_api COMMAND bmoe_server_api_test)
 endif()
 
@@ -161,6 +161,12 @@ if(PYTHON3)
             set_tests_properties(context_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
             add_test(NAME session_transaction_${spec} COMMAND bmoe_session_transaction_test ${_model})
             set_tests_properties(session_transaction_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
+            if(BMOE_BUILD_CLI)
+                add_test(NAME cli_session_${spec}
+                         COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/cli_session_test.py
+                                 $<TARGET_FILE:meitte-cli> ${_model})
+                set_tests_properties(cli_session_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
+            endif()
             add_test(NAME multi_session_${spec} COMMAND bmoe_multi_session_test ${_model})
             set_tests_properties(multi_session_${spec} PROPERTIES FIXTURES_REQUIRED ${_fixture})
             add_test(NAME reasoning_budget_${spec} COMMAND bmoe_reasoning_budget_test ${_model})

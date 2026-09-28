@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- `meitte-cli --session` no longer ends on any failure outside two matched error texts: `BMOE_ERROR`
+  `fatal` now follows the engine, so a refused or rolled-back request leaves the session serving.
+  `BMOE_DONE` adds `finish`.
+- `meitte-server` derives `finish_reason` from the engine (it compared token counts, which a
+  reasoning budget breaks) and answers rejected requests with HTTP 400 instead of 500.
+- `meitte-server --progress` lines now carry `dense_window_resident_frac` like `meitte-cli`'s: the
+  two frontends kept separate copies of the progress emitter, which had drifted. The shared
+  frontend helpers (progress line, JSON escaping, reasoning-effort normalization, template-kwargs
+  parsing) now live once in `cli/frontend_util`.
 - Report the turn outcome from the engine: `RunResult::finish` (stop, length, cancelled,
   context_full, error), `rejected` (refused before any state changed) and `fatal` (the session can
   no longer generate). Frontends previously inferred these from error text and token counts.

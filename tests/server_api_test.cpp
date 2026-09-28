@@ -224,8 +224,15 @@ int main() {
         make_stream_usage("chatcmpl-usage", "chat.completion.chunk", 1, "local-model", usage_result);
     check(usage_chunk["choices"].empty() && usage_chunk["usage"].value("total_tokens", -1) == 5,
           "final SSE usage chunk has empty choices and populated usage");
-    check(std::string(completion_finish_reason(usage_result, 2)) == "length", "token-limit completions report length");
-    check(std::string(completion_finish_reason(usage_result, 3)) == "stop", "early completions report stop");
+    // finish_reason follows the engine, not a token count: a budgeted reasoning span generates more
+    // than n_predict tokens and still ends on stop.
+    usage_result.finish = FinishReason::Length;
+    check(std::string(completion_finish_reason(usage_result)) == "length", "token-limit completions report length");
+    usage_result.finish = FinishReason::Stop;
+    usage_result.summary.n_generated = 40;
+    check(std::string(completion_finish_reason(usage_result)) == "stop", "end-of-generation reports stop");
+    usage_result.tool_calls.push_back({"id", "fn", "{}"});
+    check(std::string(completion_finish_reason(usage_result)) == "tool_calls", "tool calls report tool_calls");
 
     int sockets[2] = {-1, -1};
     check(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0, "socketpair opens");

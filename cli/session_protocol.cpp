@@ -1,4 +1,5 @@
 #include "session_protocol.h"
+#include "frontend_util.h"
 
 #include <algorithm>
 #include <cctype>
@@ -11,14 +12,6 @@ namespace meitte {
 namespace {
 
 using json = nlohmann::json;
-
-std::string normalize_reasoning_effort(std::string value) {
-    std::string lower = value;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower == "low" || lower == "medium" || lower == "high" || lower == "none") return lower;
-    return value;
-}
 
 bool parse_session_messages(const json & value, std::vector<ChatMessage> & out, std::string & error) {
     if (!value.is_array() || value.empty()) {
@@ -92,43 +85,6 @@ bool parse_session_messages(const json & value, std::vector<ChatMessage> & out, 
     return true;
 }
 
-bool parse_session_kwargs(const json & value,
-                          std::map<std::string, std::string> & out,
-                          std::optional<bool> & generic_think,
-                          std::optional<std::string> & generic_effort,
-                          std::string & error) {
-    if (!value.is_object()) {
-        error = "chat_template_kwargs must be an object";
-        return false;
-    }
-    for (auto it = value.begin(); it != value.end(); ++it) {
-        if (it.key().empty() || it.key().size() > 128) {
-            error = "chat_template_kwargs keys must be 1..128 bytes";
-            return false;
-        }
-        if (it.key() == "enable_thinking") {
-            if (!it.value().is_boolean()) {
-                error = "chat_template_kwargs.enable_thinking must be a boolean";
-                return false;
-            }
-            generic_think = it.value().get<bool>();
-        } else if (it.key() == "reasoning_effort") {
-            if (!it.value().is_string()) {
-                error = "chat_template_kwargs.reasoning_effort must be a string";
-                return false;
-            }
-            generic_effort = normalize_reasoning_effort(it.value().get<std::string>());
-            if (generic_effort->empty()) {
-                error = "chat_template_kwargs.reasoning_effort must be non-empty";
-                return false;
-            }
-        } else {
-            out[it.key()] = it.value().dump();
-        }
-    }
-    return true;
-}
-
 bool parse_session_generate(const json & root, const RunConfig & cfg, SessionCommand & out, std::string & error) {
     const bool has_prompt = root.contains("prompt");
     const bool has_messages = root.contains("messages");
@@ -166,8 +122,8 @@ bool parse_session_generate(const json & root, const RunConfig & cfg, SessionCom
     std::optional<std::string> explicit_effort;
     std::optional<bool> generic_think;
     if (root.contains("chat_template_kwargs") &&
-        !parse_session_kwargs(root["chat_template_kwargs"], out.chat_template_kwargs, generic_think, explicit_effort,
-                              error))
+        !frontend::parse_template_kwargs(root["chat_template_kwargs"], out.chat_template_kwargs, generic_think,
+                                         explicit_effort, error))
         return false;
     if (explicit_think && generic_think && *explicit_think != *generic_think) {
         error = "conflicting thinking controls: think and chat_template_kwargs.enable_thinking disagree";
@@ -181,7 +137,7 @@ bool parse_session_generate(const json & root, const RunConfig & cfg, SessionCom
             error = "reasoning_effort must be a non-empty string";
             return false;
         }
-        typed_effort = normalize_reasoning_effort(root["reasoning_effort"].get<std::string>());
+        typed_effort = frontend::normalize_reasoning_effort(root["reasoning_effort"].get<std::string>());
     }
     if (typed_effort && explicit_effort && *typed_effort != *explicit_effort) {
         error = "conflicting reasoning_effort controls";

@@ -16,6 +16,7 @@
 #include "bmoe/decode_trace.h"
 #include "bmoe/version.h"
 #include "session_protocol.h"
+#include "frontend_util.h"
 
 #include <algorithm>
 #include <atomic>
@@ -48,75 +49,15 @@
 using namespace meitte;
 using SessionCmd = SessionCommand;
 using json = nlohmann::json;
+using frontend::emit_progress_line;
+using frontend::json_escape;
+using frontend::normalize_reasoning_effort;
+using frontend::ProgressDelta;
+using frontend::read_text_file;
 
 static int env_int(const char * k, int dflt) {
     const char * v = std::getenv(k);
     return (v && *v) ? std::atoi(v) : dflt;
-}
-
-static std::string normalize_reasoning_effort(std::string value) {
-    std::string lower = value;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower == "low" || lower == "medium" || lower == "high" || lower == "none") return lower;
-    return value;
-}
-
-static std::string json_escape(const std::string & s) {
-    const std::string quoted = json(s).dump(-1, ' ', false, json::error_handler_t::replace);
-    return quoted.size() >= 2 ? quoted.substr(1, quoted.size() - 2) : std::string{};
-}
-
-static bool read_text_file(const std::string & path, std::string & out, std::string & error) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        error = "cannot read " + path;
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    return true;
-}
-
-// What BMOE_PROGRESS already delivered this generation, so each line carries only the new tail.
-// One state per generation: reset it (fresh object) when a new one begins.
-struct ProgressDelta {
-    std::string reasoning;
-    std::string text;
-};
-
-static bool is_extension(const std::string & full, const std::string & prev) {
-    return full.size() >= prev.size() && full.compare(0, prev.size(), prev) == 0;
-}
-
-// One token's line-protocol output: the optional BMOE_LOAD, then BMOE_PROGRESS (docs/telemetry.md).
-// Both emitters — the one-shot --progress run and the interactive session, which is a superset of it
-// — must produce a byte-identical line, since the Android app parses one parser's worth of protocol.
-// Keeping the format string in one place is what makes that true rather than merely intended.
-//
-// The answer travels as a DELTA: sending the cumulative text every token made a generation of n
-// tokens write, escape and parse O(n^2) bytes (#119). The common case appends the suffix since the
-// last line; when a closing tag makes common_chat_parse retroactively reclassify answer text as
-// reasoning, an append cannot express it, so the line carries the full snapshot with "reset":1 and
-// the reader replaces instead of appending. The first line of a generation is a plain extension of
-// the empty state. The full final text still travels in BMOE_DONE.
-static void emit_progress_line(const TokenMetrics & m, ProgressDelta & st) {
-    if (m.read_bytes || m.io_ms > 0.0)
-        std::printf("BMOE_LOAD {\"mb\":%.2f,\"ms\":%.1f}\n", m.read_bytes / (1024.0 * 1024.0), m.io_ms);
-    const bool ext = is_extension(m.reasoning, st.reasoning) && is_extension(m.text, st.text);
-    const std::string d_reason = ext ? m.reasoning.substr(st.reasoning.size()) : m.reasoning;
-    const std::string d_text = ext ? m.text.substr(st.text.size()) : m.text;
-    std::printf("BMOE_PROGRESS {\"step\":%d,\"steps\":%d,\"wall_ms\":%.1f,\"io_ms\":%.1f,"
-                "\"compute_ms\":%.1f,\"mgmt_ms\":%.1f,\"stall_ms\":%.1f,\"read_mb\":%.2f,"
-                "\"cache_hit_pct\":%.1f,\"majflt\":%llu,\"cpu_ms\":%.1f,\"dense_resident_frac\":%.3f,"
-                "\"dense_window_resident_frac\":%.3f,"
-                "%s\"delta_reasoning\":\"%s\",\"delta_text\":\"%s\"}\n",
-                m.step, m.steps, m.wall_ms, m.io_ms, m.compute_ms, m.mgmt_ms, m.stall_ms,
-                m.read_bytes / (1024.0 * 1024.0), m.cache_hit_pct, (unsigned long long) m.majflt, m.cpu_ms,
-                m.dense_resident_frac, m.dense_window_resident_frac, ext ? "" : "\"reset\":1,",
-                json_escape(d_reason).c_str(), json_escape(d_text).c_str());
-    st.reasoning = m.reasoning;
-    st.text = m.text;
-    std::fflush(stdout);
 }
 
 // Interactive session: keep the model loaded and the expert cache warm across prompts, reading
@@ -234,14 +175,12 @@ static int run_session_loop(const RunConfig & cfg,
         ProgressDelta pd; // fresh per generation: the first line extends the empty state
         RunResult r = session->generate(req, [&](const TokenMetrics & m) { emit_progress_line(m, pd); }, sink);
         if (!r) {
-            // A bad request (empty prompt, context overflow) leaves the session usable; a decode
-            // failure means the context is compromised, so end the loop.
-            bool recoverable = r.error.find("exceeds the session n_ctx") != std::string::npos ||
-                               r.error.find("empty prompt") != std::string::npos;
-            std::printf("BMOE_ERROR {\"id\":%d,\"fatal\":%s,\"msg\":\"%s\"}\n", cmd.id, recoverable ? "false" : "true",
+            // The engine rolls a failed turn back and says whether the session survived it: only a
+            // fatal streaming failure ends the loop. A bad request or a full context does not.
+            std::printf("BMOE_ERROR {\"id\":%d,\"fatal\":%s,\"msg\":\"%s\"}\n", cmd.id, r.fatal ? "true" : "false",
                         json_escape(r.error).c_str());
             std::fflush(stdout);
-            if (!recoverable) {
+            if (r.fatal) {
                 rc = 1;
                 break;
             }
@@ -249,29 +188,29 @@ static int run_session_loop(const RunConfig & cfg,
         }
         if (!r.cancelled) kv_preserve_started = true;
         const RunSummary & s = r.summary;
-        std::printf("BMOE_DONE {\"id\":%d,\"cancelled\":%s,\"tokens\":%d,\"tok_s\":%.3f,\"prefill_s\":%.3f,"
-                    "\"prefill_tps\":%.2f,\"load_s\":%.3f,\"cache_hit_pct\":%.1f,\"n_prompt\":%d,\"n_past\":%d,"
-                    "\"compute_s_tok\":%.4f,\"io_s_tok\":%.4f,\"cache_resident_mib\":%.0f,\"cache_budget_mib\":%.0f,"
-                    "\"read_mib\":%.1f,\"stall_s_tok\":%.4f,\"mgmt_s_tok\":%.4f,\"majflt_tok\":%.2f,\"cpu_s_tok\":%.4f,"
-                    "\"prefill_cpu_s\":%.3f,\"prefill_read_mib\":%.1f,\"prefill_io_s\":%.3f,"
-                    "\"media_prepare_s\":%.3f,\"media_projector_s\":%.3f,"
-                    "\"prefill_stall_s\":%.3f,\"prefill_mgmt_s\":%.3f,"
-                    "\"dense_read_mib\":%.1f,\"dense_io_s\":%.3f,\"dense_wait_s\":%.3f,"
-                    "\"prefill_majflt\":%llu,\"prefill_peak_rss_mib\":%.1f,\"decode_peak_rss_mib\":%.1f,"
-                    "\"token_demand_mib\":%.1f,\"mtp_drafted\":%lld,\"mtp_accepted\":%lld,\"mtp_decodes\":%lld,"
-                    "\"mtp_draft_s_tok\":%.4f,\"drafted_steps\":%lld,\"loop_overhead_s_tok\":%.4f,"
-                    "\"reasoning\":\"%s\",\"text\":\"%s\"}\n",
-                    cmd.id, r.cancelled ? "true" : "false", s.n_generated, s.tokens_per_second, s.prefill_seconds,
-                    (s.prefill_seconds > 0 ? s.n_prompt / s.prefill_seconds : 0.0), s.load_seconds, s.cache_hit_pct,
-                    s.n_prompt, s.n_past, s.moe_compute_s_per_token, s.moe_io_s_per_token, s.cache_resident_mib,
-                    s.cache_budget_mib, s.moe_read_mib, s.moe_stall_s_per_token, s.moe_mgmt_s_per_token,
-                    s.majflt_per_token, s.cpu_s_per_token, s.prefill_cpu_seconds, s.prefill_read_mib,
-                    s.prefill_io_seconds, s.media_prepare_seconds, s.media_projector_seconds, s.prefill_stall_seconds,
-                    s.prefill_mgmt_seconds, s.dense_read_mib, s.dense_io_seconds, s.dense_wait_seconds,
-                    (unsigned long long) s.prefill_majflt, s.prefill_peak_rss_mib, s.decode_peak_rss_mib,
-                    s.token_demand_mib, s.mtp_drafted, s.mtp_accepted, s.mtp_decodes, s.mtp_draft_s_per_token,
-                    s.drafted_steps, s.loop_overhead_s_per_token, json_escape(r.reasoning_text).c_str(),
-                    json_escape(r.generated_text).c_str());
+        std::printf(
+            "BMOE_DONE {\"id\":%d,\"cancelled\":%s,\"finish\":\"%s\",\"tokens\":%d,\"tok_s\":%.3f,\"prefill_s\":%.3f,"
+            "\"prefill_tps\":%.2f,\"load_s\":%.3f,\"cache_hit_pct\":%.1f,\"n_prompt\":%d,\"n_past\":%d,"
+            "\"compute_s_tok\":%.4f,\"io_s_tok\":%.4f,\"cache_resident_mib\":%.0f,\"cache_budget_mib\":%.0f,"
+            "\"read_mib\":%.1f,\"stall_s_tok\":%.4f,\"mgmt_s_tok\":%.4f,\"majflt_tok\":%.2f,\"cpu_s_tok\":%.4f,"
+            "\"prefill_cpu_s\":%.3f,\"prefill_read_mib\":%.1f,\"prefill_io_s\":%.3f,"
+            "\"media_prepare_s\":%.3f,\"media_projector_s\":%.3f,"
+            "\"prefill_stall_s\":%.3f,\"prefill_mgmt_s\":%.3f,"
+            "\"dense_read_mib\":%.1f,\"dense_io_s\":%.3f,\"dense_wait_s\":%.3f,"
+            "\"prefill_majflt\":%llu,\"prefill_peak_rss_mib\":%.1f,\"decode_peak_rss_mib\":%.1f,"
+            "\"token_demand_mib\":%.1f,\"mtp_drafted\":%lld,\"mtp_accepted\":%lld,\"mtp_decodes\":%lld,"
+            "\"mtp_draft_s_tok\":%.4f,\"drafted_steps\":%lld,\"loop_overhead_s_tok\":%.4f,"
+            "\"reasoning\":\"%s\",\"text\":\"%s\"}\n",
+            cmd.id, r.cancelled ? "true" : "false", finish_reason_name(r.finish), s.n_generated, s.tokens_per_second,
+            s.prefill_seconds, (s.prefill_seconds > 0 ? s.n_prompt / s.prefill_seconds : 0.0), s.load_seconds,
+            s.cache_hit_pct, s.n_prompt, s.n_past, s.moe_compute_s_per_token, s.moe_io_s_per_token,
+            s.cache_resident_mib, s.cache_budget_mib, s.moe_read_mib, s.moe_stall_s_per_token, s.moe_mgmt_s_per_token,
+            s.majflt_per_token, s.cpu_s_per_token, s.prefill_cpu_seconds, s.prefill_read_mib, s.prefill_io_seconds,
+            s.media_prepare_seconds, s.media_projector_seconds, s.prefill_stall_seconds, s.prefill_mgmt_seconds,
+            s.dense_read_mib, s.dense_io_seconds, s.dense_wait_seconds, (unsigned long long) s.prefill_majflt,
+            s.prefill_peak_rss_mib, s.decode_peak_rss_mib, s.token_demand_mib, s.mtp_drafted, s.mtp_accepted,
+            s.mtp_decodes, s.mtp_draft_s_per_token, s.drafted_steps, s.loop_overhead_s_per_token,
+            json_escape(r.reasoning_text).c_str(), json_escape(r.generated_text).c_str());
         std::fflush(stdout);
     }
 
