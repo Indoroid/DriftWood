@@ -76,7 +76,7 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   GPU offload and iOS targets are outside the current plan.
 - **Shared experts stay resident.** Architectures with an always-on shared expert (e.g.
   `gemma4`, `deepseek4`, `glm-dsa`, `glm5next`, `nemotron_h_moe`, `cohere2moe`, `hy_v3`,
-  `hy_v4`, and `minimax-m3`) stream the routed experts but
+  `hy_v4`, `minimax-m3`, and `inkling`) stream the routed experts but
   keep the shared expert — and any dense layers — resident (in the page cache, or in the
   engine's own buffers under `--dense-weights anon`),
   so the streamed fraction (and the memory saving) is smaller than for a purely routed model
@@ -87,11 +87,9 @@ uses expert and matrix readiness callbacks on the synced fork. See [seam.md § 4
   or separate gate/up expert tensors for `cohere2moe` and `hy_v3`. Meitte selects one layout
   per model file and rejects a file that mixes them across layers. The pinned converter emits
   split tensors for these families; supporting mixed files would require per-layer recipes.
-- **Inkling has no loader in the pinned llama.cpp.** The [draft upstream PR](https://github.com/ggml-org/llama.cpp/pull/25731)
-  adds an Inkling loader, converter, and new GGML attention operator, none of which are in
-  this submodule. Meitte cannot load or stream an Inkling GGUF until those llama.cpp changes
-  land in a compatible dependency; a streaming recipe can then be validated against its
-  expert tensor layout.
+- **Inkling stacked ModelOpt NVFP4 checkpoints cannot be converted.** The llama.cpp converter
+  rejects their auxiliary expert tensors because it does not decode that packed layout. Convert
+  from a BF16 checkpoint instead, then quantize the resulting GGUF.
 - **A resident tensor can be larger than RAM, and then it is only ever mmap'd.** `qwen4exp`
   (Qwen3.8-Flash-Next) carries a 51B n-gram embedding table (`per_layer_token_embd`, ~28.8 GB at
   IQ4_NL) that the graph reads sixteen rows at a time through `get_rows`. It is not indexed by

@@ -77,6 +77,7 @@ The following GGUF `general.architecture` values are supported for expert stream
 | `qwen4exp` | Qwen3.8 Flash-Next / Qwen4 preview |
 | `cohere2moe` | Cohere North MoE |
 | `hunyuan-moe` | Hunyuan MoE |
+| `inkling` | Thinking Machines Inkling |
 | `hy_v3` | Hunyuan HY V3 |
 | `hy_v4` | Hunyuan HY V4 |
 | `minimax-m3` | MiniMax M3 |

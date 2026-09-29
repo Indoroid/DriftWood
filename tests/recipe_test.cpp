@@ -12,7 +12,7 @@ static void check(bool value) {
 int main() {
     const char * split[] = {"qwen3moe", "qwen2moe",  "qwen35moe",   "glm-dsa",  "glm5next",   "gpt-oss",
                             "lfm2moe",  "deepseek4", "bailingmoe3", "qwen4exp", "cohere2moe", "hunyuan-moe",
-                            "hy_v3",    "hy_v4",     "minimax-m3",  "mimo2"};
+                            "inkling",  "hy_v3",     "hy_v4",      "minimax-m3", "mimo2"};
     for (const char * arch : split) {
         const meitte::MoeRecipe * recipe = meitte::find_moe_recipe(arch);
         check(recipe && std::strcmp(recipe->exps_suffix[0], "ffn_gate_exps") == 0);
@@ -23,8 +23,7 @@ int main() {
     const meitte::MoeRecipe * up_down = meitte::find_moe_recipe("nemotron_h_moe");
     check(fused && std::strcmp(fused->exps_suffix[0], "ffn_gate_up_exps") == 0);
     check(up_down && std::strcmp(up_down->exps_suffix[0], "ffn_up_exps") == 0);
-    check(meitte::n_moe_recipes() == 18);
-    check(meitte::find_moe_recipe("inkling") == nullptr);
+    check(meitte::n_moe_recipes() == 19);
 
     // A recipe with a fused alternative follows the file; every other recipe ignores it.
     const meitte::MoeRecipe * alt = meitte::find_moe_recipe("cohere2moe");

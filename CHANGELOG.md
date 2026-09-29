@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Add streamed MoE support for Inkling using its split gate, up, and down expert tensors. Its
+  dense leading blocks and shared experts remain resident.
 - Build: `meitte-cli` compiles on Windows again. `cli/main.cpp` includes `windows.h`, whose `min`
   and `max` macros broke `std::numeric_limits<int>::max()` in the context env parsing (MSVC C2589);
   it now defines `NOMINMAX` first, as `core/src/io/mapping_release.cpp` does.

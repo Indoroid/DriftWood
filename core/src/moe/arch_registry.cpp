@@ -77,6 +77,9 @@ static const MoeRecipe k_recipes[] = {
     {"qwen4exp", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
     {"cohere2moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}, /*fused_gate_up_alt*/ true},
     {"hunyuan-moe", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
+    // Inkling has leading dense blocks and two always-on shared experts; its routed experts use
+    // the standard split layout. Dense and shared weights stay resident.
+    {"inkling", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
     {"hy_v3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}, /*fused_gate_up_alt*/ true},
     {"hy_v4", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
     {"minimax-m3", {"ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"}},
