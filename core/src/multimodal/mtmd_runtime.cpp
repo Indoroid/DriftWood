@@ -265,8 +265,14 @@ MtmdPrefillResult MtmdRuntime::evaluate(llama_context * lctx,
                     int remaining;
                     int batch_size;
                     int offset;
-                    static int after(llama_batch batch, void * opaque) {
+                    static int32_t after(const mtmd_helper_embd_batch * embd, void * opaque) {
                         auto & self = *static_cast<Callback *>(opaque);
+                        // The observer reads n_tokens and pos only. pos is section-major, so its first
+                        // n_tokens entries are the decoder positions of this sub-batch.
+                        llama_batch batch{};
+                        batch.n_tokens = embd->n_tokens;
+                        batch.embd = const_cast<float *>(embd->embd);
+                        batch.pos = const_cast<llama_pos *>(embd->pos);
                         if (self.observer.after) self.observer.after(batch);
                         self.remaining -= batch.n_tokens;
                         self.offset += batch.n_tokens;

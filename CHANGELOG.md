@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Build: adapt the media prefill observer to the pinned llama.cpp, whose
+  `mtmd_helper_decode_image_chunk` callback now receives `mtmd_helper_embd_batch` instead of a
+  `llama_batch`. Every host build failed to compile `mtmd_runtime.cpp` after the Inkling submodule bump.
 - Add streamed MoE support for Inkling using its split gate, up, and down expert tensors. Its
   dense leading blocks and shared experts remain resident.
 - Build: `meitte-cli` compiles on Windows again. `cli/main.cpp` includes `windows.h`, whose `min`
