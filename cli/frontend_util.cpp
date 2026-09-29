@@ -83,12 +83,11 @@ void emit_progress_line(const TokenMetrics & m, ProgressDelta & st) {
     std::printf("BMOE_PROGRESS {\"step\":%d,\"steps\":%d,\"wall_ms\":%.1f,\"io_ms\":%.1f,"
                 "\"compute_ms\":%.1f,\"mgmt_ms\":%.1f,\"stall_ms\":%.1f,\"read_mb\":%.2f,"
                 "\"cache_hit_pct\":%.1f,\"majflt\":%llu,\"cpu_ms\":%.1f,\"dense_resident_frac\":%.3f,"
-                "\"dense_window_resident_frac\":%.3f,"
                 "%s\"delta_reasoning\":\"%s\",\"delta_text\":\"%s\"}\n",
                 m.step, m.steps, m.wall_ms, m.io_ms, m.compute_ms, m.mgmt_ms, m.stall_ms,
                 m.read_bytes / (1024.0 * 1024.0), m.cache_hit_pct, (unsigned long long) m.majflt, m.cpu_ms,
-                m.dense_resident_frac, m.dense_window_resident_frac, ext ? "" : "\"reset\":1,",
-                json_escape(d_reason).c_str(), json_escape(d_text).c_str());
+                m.dense_resident_frac, ext ? "" : "\"reset\":1,", json_escape(d_reason).c_str(),
+                json_escape(d_text).c_str());
     st.reasoning = m.reasoning;
     st.text = m.text;
     std::fflush(stdout);

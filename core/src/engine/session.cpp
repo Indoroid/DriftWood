@@ -1,31 +1,15 @@
 #include "session_impl.h"
 #include "tensor_overrides.h"
 
-#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
-#include "ggml-cpu.h"
-#endif
-
 #include <algorithm>
 
 namespace meitte {
-
-#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
-std::atomic<bool> detail::dense_weight_hook_active{false};
-#endif
 
 Session::Impl::~Impl() {
     // Deterministic teardown order: stop the I/O pool (it holds fds into the mmap and its
     // buffers back the rebound expert tensors), then the context (its eval callback points
     // at the hook), then the hook, then unmap the model, then release the backend.
     source.shutdown();
-#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
-    if (weight_hook_registered) {
-        ggml_cpu_set_weight_ready_hook(nullptr, nullptr);
-        detail::dense_weight_hook_active.store(false, std::memory_order_release);
-    }
-#endif
-    dense_stream.shutdown();
-    dense_fixed.shutdown();
     if (smpl) llama_sampler_free(smpl); // independent of ctx/model; free before them
     // The speculative driver holds both contexts and detaches the backend samplers it
     // installed on the draft one, so it goes before either context is freed.
@@ -43,7 +27,7 @@ Session::Impl::~Impl() {
 bool Session::Impl::abort_requested(void * impl) {
     auto * p = static_cast<Impl *>(impl);
     return p->capture_abort.load(std::memory_order_acquire) || p->cancel_requested.load(std::memory_order_relaxed) ||
-           p->hook->fatal() || p->source.fatal() || p->dense_stream.fatal();
+           p->hook->fatal() || p->source.fatal();
 }
 
 void Session::Impl::attach_context(llama_context * c) {
@@ -55,7 +39,6 @@ void Session::Impl::trace_begin(int base_pos, int n_tokens, int phase, MediaKind
     // Not a trace concern, but the same per-decode frame: the drop policy is decode-only
     // unless armed for prefill, so it has to be told which phase this batch is.
     hook->set_batch_phase(phase);
-    hook->begin_graph();
     if (route_trace) hook->begin_trace_batch(base_pos, n_tokens, phase, turn, static_cast<uint8_t>(media_kind));
     // A node is computed once for the whole batch, not per token, so a prefill chunk's graph is
     // attributed to its last position rather than pretending to split across the chunk.
@@ -137,7 +120,6 @@ void Session::set_cache_budget_mb(int mib) {
 
 void Session::cancel() {
     impl_->cancel_requested.store(true, std::memory_order_relaxed);
-    impl_->dense_stream.notify_cancel();
 }
 
 } // namespace meitte

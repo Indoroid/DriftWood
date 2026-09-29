@@ -40,7 +40,6 @@ struct DenseTensorRef {
     uint64_t file_off = 0;
     uint64_t size = 0;
     int file_idx = 0; // which shard file holds the bytes (0 for a single-file model)
-    int layer = -1;   // graph layer for bounded dense streaming; -1 stays resident
     // Other tensor objects over the same file range. A tied output head can share the token
     // embedding bytes and must be rebound with the primary tensor.
     std::vector<ggml_tensor *> aliases;

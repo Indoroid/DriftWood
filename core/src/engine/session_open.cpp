@@ -9,9 +9,6 @@
 #include "../io/platform_io.h"
 
 #include "ggml.h"
-#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
-#include "ggml-cpu.h"
-#endif
 
 #include "common.h"
 
@@ -42,13 +39,6 @@ std::string check_session_config(const SessionConfig & c) {
     if (c.n_ctx <= 0) return "n_ctx must be positive";
     if (c.n_batch <= 0) return "n_batch must be positive";
     if (c.n_ubatch < 0) return "n_ubatch must be >= 0";
-    const auto & ds = c.dense_stream;
-    if (ds.enabled && (c.moe.enabled || ds.resident_mb < 0 || ds.window_mb <= 0 || ds.io_lanes < 1 || ds.io_lanes > 2 ||
-                       (ds.two_wave && !ds.overlap) || c.spec.is_mtp() || !c.tensor_buffer_overrides.empty()))
-        return "invalid dense streaming configuration";
-#ifndef BMOE_HAVE_WEIGHT_READY_HOOK
-    if (ds.enabled && ds.overlap) return "dense overlap requires the CPU weight-ready hook";
-#endif
     if (c.context.min_ctx < 0 || c.context.max_ctx < 0 || c.context.min_ctx > c.n_ctx ||
         (c.context.max_ctx && c.context.max_ctx < c.n_ctx) ||
         (c.context.grow != ContextMode::Off && !c.context.max_ctx))
@@ -368,133 +358,6 @@ bool Session::Impl::create_contexts(bool install_eval_callback, std::string & er
     return true;
 }
 
-bool Session::Impl::bind_dense_stream(LazyGgufMeta & meta, std::string & error) {
-    const GgufOffsets & offs = meta.offsets();
-    if (!offs.ok) return fail(error, "cannot read gguf offsets: " + cfg.model_path);
-    if (meta.info().n_expert > 0) return fail(error, "dense streaming requires a model with zero experts");
-
-    // The scheduler offers every node to the ask callback before it computes the graph. Abort
-    // the capture graph at compute start so a >RAM model never makes a full warm-up pass.
-    hook->begin_capture();
-    capture_abort.store(true, std::memory_order_release);
-    llama_token token = capture_token(vocab);
-    const int capture_rc = llama_decode(ctx.get(), llama_batch_get_one(&token, 1));
-    capture_abort.store(false, std::memory_order_release);
-    hook->end_capture();
-    if (capture_rc == 0 || hook->captured_weight_objects().empty())
-        return fail(error, "dense graph capture did not abort before compute with weights captured");
-    pio::ProcessMemory capture_memory;
-    if (pio::process_memory(&capture_memory))
-        std::fprintf(stderr, "bmoe: dense capture — %zu weight leaves, RSS %llu MiB before weight reads\n",
-                     hook->captured_weight_objects().size(), (unsigned long long) (capture_memory.rss_bytes >> 20));
-    llama_memory_clear(llama_get_memory(ctx.get()), true);
-
-    // A matrix streams when the graph uses it as a per-layer matrix after the early (pinned) span.
-    auto streamable_layer = [&](const std::string & name) {
-        int layer = -1;
-        if (std::sscanf(name.c_str(), "blk.%d.", &layer) != 1 || layer < 0 || layer >= n_layer ||
-            !hook->captured_matrix_weights().count(name) || hook->early_matrix_weights().count(name))
-            return -1;
-        return layer;
-    };
-
-    std::vector<DenseTensorRef> fixed, candidates;
-    std::map<std::tuple<int, uint64_t, uint64_t>, size_t> seen;
-    for (ggml_tensor * tensor : hook->captured_weight_objects()) {
-        if (!tensor) continue;
-        const std::string name = tensor->name;
-        auto off = offs.off_by_name.find(name);
-        auto size = offs.size_by_name.find(name);
-        auto type = offs.type_by_name.find(name);
-        if (off == offs.off_by_name.end() || size == offs.size_by_name.end() || type == offs.type_by_name.end())
-            continue; // graph input, not a GGUF weight
-        if (!tensor->data || !ggml_is_contiguous(tensor) || ggml_nbytes(tensor) != size->second ||
-            (int) tensor->type != type->second)
-            return fail(error, "dense GGUF type, size, strides or backing mismatch: " + name);
-        const int shard = offs.file_by_name.at(name);
-        const auto key = std::make_tuple(shard, off->second, size->second);
-        auto found = seen.find(key);
-        if (found != seen.end()) {
-            DenseTensorRef & owner = fixed[found->second];
-            if (owner.tensor->type != tensor->type)
-                return fail(error, "dense alias type mismatch for GGUF file range: " + name);
-            owner.aliases.push_back(tensor);
-            if (streamable_layer(name) != owner.layer)
-                owner.layer = -1; // a tied output or gather keeps its shared range resident
-            continue;
-        }
-        DenseTensorRef ref;
-        ref.tensor = tensor;
-        ref.file_idx = shard;
-        ref.file_off = off->second;
-        ref.size = size->second;
-        ref.layer = streamable_layer(name);
-        seen.emplace(key, fixed.size());
-        fixed.push_back(std::move(ref));
-    }
-    if (fixed.empty()) return fail(error, "dense capture found no GGUF weight leaves");
-
-    // Alias groups are classified together. The fixed set includes controls, embeddings and
-    // output weights; the remaining budget pins the earliest matrices across every token.
-    uint64_t compulsory = 0;
-    for (const DenseTensorRef & ref : fixed)
-        if (ref.layer < 0) compulsory += ref.size;
-    const uint64_t window = (uint64_t) cfg.dense_stream.window_mb << 20;
-    const uint64_t available = pio::mem_available_bytes();
-    const uint64_t auto_budget = available > (7ull << 30) + window ? available - (7ull << 30) - window : 0;
-    const uint64_t budget = cfg.dense_stream.resident_mb ? (uint64_t) cfg.dense_stream.resident_mb << 20 : auto_budget;
-    if (compulsory > budget)
-        return fail(error, "dense resident budget is smaller than embeddings, output and control tensors (need " +
-                               std::to_string((compulsory + (1 << 20) - 1) >> 20) + " MiB)");
-    std::stable_sort(fixed.begin(), fixed.end(),
-                     [](const DenseTensorRef & a, const DenseTensorRef & b) { return a.layer < b.layer; });
-    uint64_t pinned_bytes = compulsory;
-    std::vector<DenseTensorRef> pinned;
-    for (DenseTensorRef & ref : fixed) {
-        if (ref.layer < 0 || pinned_bytes + ref.size <= budget) {
-            if (ref.layer >= 0) pinned_bytes += ref.size;
-            pinned.push_back(std::move(ref));
-        } else
-            candidates.push_back(std::move(ref));
-    }
-    if (candidates.empty()) return fail(error, "dense stream selected no matrices; lower resident budget or use mmap");
-    std::vector<const void *> mapped_addresses;
-    for (const DenseTensorRef & ref : candidates) {
-        mapped_addresses.push_back(ref.tensor->data);
-        for (const ggml_tensor * alias : ref.aliases)
-            if (alias) mapped_addresses.push_back(alias->data);
-    }
-    if (pio::addresses_in_file_mappings(offs.shard_paths, mapped_addresses) != mapped_addresses.size())
-        return fail(error, "dense stream requires native file-backed GGUF matrix pointers");
-    const size_t n_streamed = candidates.size();
-    // The anonymous owner reads the fixed set once. The bounded streamer rebinds the rest to
-    // stable reserved addresses and commits pages only while their layer is active.
-    std::string fixed_error;
-    if (!dense_fixed.init(DenseWeightsMode::Anonymous, offs.shard_paths, 4096, {}, std::move(pinned), fixed_error))
-        return fail(error, "dense fixed-resident load failed: " + fixed_error);
-    if (!dense_stream.init(std::move(candidates), offs.shard_paths, 4096, window, cfg.dense_stream.io_lanes,
-                           cfg.dense_stream.overlap, cfg.dense_stream.two_wave, &cancel_requested))
-        return fail(error, "dense stream setup failed");
-    hook->set_dense_stream(&dense_stream);
-#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
-    if (cfg.dense_stream.overlap) {
-        bool expected = false;
-        if (!dense_weight_hook_active.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-            return fail(error, "only one dense overlap session can use the process-wide CPU hook at a time");
-        ggml_cpu_set_weight_ready_hook(
-            [](const ggml_tensor * src0, void * ud) -> bool {
-                return static_cast<DenseStream *>(ud)->weight_ready(src0);
-            },
-            &dense_stream);
-        weight_hook_registered = true;
-    }
-#endif
-    std::fprintf(stderr, "bmoe: dense stream — fixed %llu MiB, window %llu MiB, %zu streamed matrices, direct I/O %s\n",
-                 (unsigned long long) (pinned_bytes >> 20), (unsigned long long) (window >> 20), n_streamed,
-                 dense_stream.direct() ? "on" : "off");
-    return true;
-}
-
 bool Session::Impl::bind_expert_stream(const MoeRecipe & recipe,
                                        int n_layer_streamed,
                                        LazyGgufMeta & meta,
@@ -744,14 +607,6 @@ void Session::Impl::build_run_info(LazyGgufMeta & meta) {
     ri.drop_renorm = moe.drop_renorm;
     ri.drop_prefill = moe.drop_prefill;
     ri.substitute_lambda = moe.enabled ? moe.substitute_lambda : 0.0f;
-    const RunConfig::DenseStreamConfig & ds = cfg.dense_stream;
-    ri.dense_stream = ds.enabled;
-    ri.dense_resident_mb = ds.resident_mb;
-    ri.dense_window_mb = ds.window_mb;
-    ri.dense_io_lanes = ds.enabled ? ds.io_lanes : 0;
-    ri.dense_overlap = ds.enabled && ds.overlap;
-    ri.dense_two_wave = ds.enabled && ds.two_wave;
-    ri.dense_direct = ds.enabled && dense_stream.direct();
     // The CSV keeps the two familiar flags, derived from the resolved dense-weights policy.
     ri.dense_weights = dense_weights_name(moe.dense_weights);
     if (moe.enabled) {
@@ -850,7 +705,7 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     // A recipe maps expert tensors, so a model without experts has nothing a recipe could add.
     if (cfg.moe.enabled && meta.info().ok && meta.info().n_expert <= 0) {
         error = "expert streaming (--moe-stream) needs a model with experts, and this " + im.arch +
-                " model has none; use dense streaming (--dense-stream) to stream its weights";
+                " model has none; run it without --moe-stream";
         return nullptr;
     }
     if (cfg.moe.enabled && !resolve_stream_recipe(im.arch, n_layer_streamed, cfg.model_path, meta, recipe, error))
@@ -869,8 +724,7 @@ std::unique_ptr<Session> Session::open(const SessionConfig & input_cfg,
     // The streamer needs the callback to see routing; the compute trace needs it to time nodes.
     // Installing it for the trace alone is what lets a NON-streamed run be measured — the dense
     // mmap baseline the streamed numbers are argued against.
-    if (!im.create_contexts(cfg.moe.enabled || cfg.dense_stream.enabled || compute_trace, error)) return nullptr;
-    if (cfg.dense_stream.enabled && !im.bind_dense_stream(meta, error)) return nullptr;
+    if (!im.create_contexts(cfg.moe.enabled || compute_trace, error)) return nullptr;
     if (cfg.moe.enabled && !im.bind_expert_stream(recipe, n_layer_streamed, meta, route_trace, io_trace, error))
         return nullptr;
     im.attach_decode_traces(compute_trace);

@@ -91,8 +91,7 @@ The registry is intentionally explicit: a model is supported only when its exper
 known to preserve the native GGUF streaming invariant. See `docs/adding-a-model.md` for adding a
 new architecture safely.
 
-Dense streaming does not use an expert recipe. The `qwen35` Qwen3.8 27B text GGUF has been run in
-this mode; its separate multimodal projector was not available for this validation.
+A model without experts runs from the plain mmap load; there is no dense streaming mode.
 
 ## Quick Start
 
@@ -111,22 +110,6 @@ build/cli/meitte-cli \
   --moe-stream --cache-mb auto \
   --chatml -p "Explain what a mixture-of-experts model is."
 ```
-
-For a dense model that exceeds RAM, start with a small context and physical batch:
-
-```bash
-build/cli/meitte-cli \
-  -m /path/to/dense-model.gguf \
-  --dense-stream --dense-resident-mb 0 --dense-window-mb 1024 \
-  --dense-io-lanes 2 --batch-size 1 --ubatch-size 1 \
-  -c 128 -n 3 -p "Hi" --progress
-```
-
-`--dense-resident-mb 0` (the default) sizes the fixed set from available RAM while reserving
-7 GiB plus the window for other memory. `--dense-overlap` enables the fork's CPU matrix-ready
-callback; `--dense-two-wave` publishes the first projection before staging the rest and requires
-overlap. Dense mode currently streams text inference without an MTP draft context.
-The same dense flags are available in `meitte-server` for persistent text sessions.
 
 Start an OpenAI-compatible server:
 

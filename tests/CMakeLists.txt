@@ -4,13 +4,8 @@
 add_executable(bmoe_moe_gates moe_gates.cpp)
 target_link_libraries(bmoe_moe_gates PRIVATE bmoe_core)
 
-add_executable(bmoe_dense_stream_test dense_stream_test.cpp)
-target_link_libraries(bmoe_dense_stream_test PRIVATE bmoe_core)
-target_include_directories(bmoe_dense_stream_test PRIVATE ${CMAKE_SOURCE_DIR}/core/src/moe)
-add_test(NAME dense_stream COMMAND bmoe_dense_stream_test)
-
-add_executable(bmoe_dense_gates dense_gates.cpp)
-target_link_libraries(bmoe_dense_gates PRIVATE bmoe_core)
+add_executable(bmoe_dense_model_test dense_model_test.cpp)
+target_link_libraries(bmoe_dense_model_test PRIVATE bmoe_core)
 
 add_executable(bmoe_recipe_test recipe_test.cpp)
 target_link_libraries(bmoe_recipe_test PRIVATE bmoe_core)
@@ -154,8 +149,8 @@ if(PYTHON3)
                              ${PYTHON3} ${CMAKE_SOURCE_DIR}/scripts/make-tiny-moe.py
                              --arch qwen3dense --type ${dtype} --out ${_dense_model})
             set_tests_properties(dense_make_tiny_model_${dtype} PROPERTIES FIXTURES_SETUP TINY_DENSE_${dtype})
-            add_test(NAME dense_gates_${dtype} COMMAND bmoe_dense_gates ${_dense_model})
-            set_tests_properties(dense_gates_${dtype} PROPERTIES FIXTURES_REQUIRED TINY_DENSE_${dtype})
+            add_test(NAME dense_model_${dtype} COMMAND bmoe_dense_model_test ${_dense_model})
+            set_tests_properties(dense_model_${dtype} PROPERTIES FIXTURES_REQUIRED TINY_DENSE_${dtype})
         endforeach()
         foreach(spec "qwen3moe" "gemma4")
             set(_model "${CMAKE_CURRENT_BINARY_DIR}/tiny-moe-${spec}.gguf")

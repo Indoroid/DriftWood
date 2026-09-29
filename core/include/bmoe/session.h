@@ -59,7 +59,6 @@ struct SessionConfig {
     bool compute_trace_layers = false;
     SamplingConfig sampling; // fixed for the session; greedy by default (temp <= 0)
     MoeStreamConfig moe;
-    RunConfig::DenseStreamConfig dense_stream;
     // Self-speculative decoding, and which source drafts. Fixed for the session: it decides whether
     // open() builds the wider verify batch, and — for the MTP source only — the draft context.
     // See RunConfig::spec.

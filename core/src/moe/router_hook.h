@@ -72,13 +72,6 @@ public:
     // the gguf tensor set, which those do not belong to. Objects, not names: tied tensors share a
     // name and file range, but each object must be rebound before its mapping can be released.
     const std::vector<ggml_tensor *> & captured_weight_objects() const { return captured_weight_objects_; }
-    const std::unordered_set<std::string> & captured_matrix_weights() const { return matrix_weights_; }
-    const std::unordered_set<std::string> & early_matrix_weights() const { return early_matrix_weights_; }
-    void set_dense_stream(class DenseStream * src) { dense_stream_ = src; }
-    void begin_graph() {
-        dense_ask_layer_ = -1;
-        dense_boundaries_.clear();
-    }
 
     // After capture, the subset of those weights the graph only ever GATHERS ROWS from — the shape a
     // token embedding table has, and the one residency policy can exploit (see IRowSource). A name is
@@ -298,12 +291,6 @@ private:
     std::vector<LayerExperts> captured_;
     std::vector<ggml_tensor *> captured_weight_objects_;
     std::unordered_set<const ggml_tensor *> captured_weight_seen_;
-    std::unordered_set<std::string> matrix_weights_;
-    std::unordered_set<std::string> early_matrix_weights_;
-    std::vector<bool> layer_seen_;
-    class DenseStream * dense_stream_ = nullptr;
-    int dense_ask_layer_ = -1;
-    std::unordered_set<const ggml_tensor *> dense_boundaries_;
     // Capture-time evidence for row_gathered_weights(): every weight seen as the TABLE of a row
     // gather, and every weight seen in any way that rules that out. The verdict is the difference.
     std::unordered_set<std::string> row_gathered_;

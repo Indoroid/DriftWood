@@ -16,7 +16,6 @@
 #include "bmoe/session.h"
 #include "run_tally.h"
 #include "../io/mapping_release.h"
-#include "../moe/dense_stream.h"
 #include "../moe/dense_weights.h"
 #include "../moe/expert_stream_source.h"
 #include "../moe/gguf_offsets.h"
@@ -39,11 +38,6 @@ namespace meitte {
 namespace detail {
 
 using ContextPtr = std::unique_ptr<llama_context, void (*)(llama_context *)>;
-
-#ifdef BMOE_HAVE_WEIGHT_READY_HOOK
-// The CPU weight-ready hook is process-wide, so at most one session may own it at a time.
-extern std::atomic<bool> dense_weight_hook_active;
-#endif
 
 // Create the MTP draft context: the same model as the target, with ctx_type = MTP so llama.cpp
 // builds the nextn graph. `target` is the target context's parameters. Returns nullptr on failure.
@@ -76,10 +70,7 @@ struct Session::Impl {
     llama_context_params context_params{};
     std::unique_ptr<RouterHook> hook; // heap: its address is baked into cparams.cb_eval_user_data
     ExpertStreamSource source;
-    DenseWeights dense_fixed;
-    DenseStream dense_stream;
     std::atomic<bool> capture_abort{false};
-    bool weight_hook_registered = false;
 
     // The MTP draft source (SpecConfig::source == mtp). A SECOND context over the SAME model,
     // created with ctx_type = MTP so llama.cpp builds the nextn graph instead of the trunk one. It
@@ -208,7 +199,6 @@ struct Session::Impl {
     bool load_model(LazyGgufMeta & meta, std::string & error);
     bool init_chat_templates(std::string & error);
     bool create_contexts(bool install_eval_callback, std::string & error);
-    bool bind_dense_stream(LazyGgufMeta & meta, std::string & error);
     bool bind_expert_stream(const MoeRecipe & recipe,
                             int n_layer_streamed,
                             LazyGgufMeta & meta,

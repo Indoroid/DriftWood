@@ -5,7 +5,7 @@ identical routing node (`ffn_moe_topk`) and expert tensors
 (`ffn_{gate,up,down}_exps`). For those, adding support is one row.
 
 A model without experts (no `<arch>.expert_count`, or 0) needs no recipe: `--moe-stream` refuses
-it before the recipe lookup and points at `--dense-stream`.
+it before the recipe lookup; run such a model without `--moe-stream`.
 
 ## 1. Add a recipe
 

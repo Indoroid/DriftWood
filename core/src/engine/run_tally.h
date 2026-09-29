@@ -1,13 +1,12 @@
 #pragma once
 
-// Per-phase measurement for Session::generate(). The expert source, the router hook and the dense
-// streamer keep cumulative counters across a warm session, so every per-token and per-phase figure
+// Per-phase measurement for Session::generate(). The expert source and the router hook keep
+// cumulative counters across a warm session, so every per-token and per-phase figure
 // is a delta between two samples. These types take the samples and close the deltas in one place.
 
 #include "bmoe/expert_source.h"
 #include "bmoe/metrics.h"
 #include "../io/platform_io.h"
-#include "../moe/dense_stream.h"
 #include "../moe/router_hook.h"
 
 #include <cstdint>
@@ -26,17 +25,6 @@ struct RoutingCounters {
     }
     RoutingCounters operator-(const RoutingCounters & o) const {
         return {routed - o.routed, dropped - o.dropped, reranked - o.reranked, substituted - o.substituted};
-    }
-};
-
-// The dense streamer's I/O counters, sampled at one instant.
-struct DenseStreamCounters {
-    uint64_t bytes = 0;
-    uint64_t io_ns = 0;
-    uint64_t wait_ns = 0;
-
-    static DenseStreamCounters of(const DenseStream & stream) {
-        return {stream.read_bytes(), stream.io_ns(), stream.wait_ns()};
     }
 };
 

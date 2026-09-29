@@ -507,15 +507,6 @@ struct RunConfig {
 
     SamplingConfig sampling; // greedy by default (temp <= 0); opt-in stochastic decoding
     MoeStreamConfig moe;
-    struct DenseStreamConfig {
-        bool enabled = false;
-        // 0 sizes the pinned set from MemAvailable after reserving 7 GiB for state, I/O and the OS.
-        int resident_mb = 0;
-        int window_mb = 1024;
-        int io_lanes = 2;
-        bool overlap = false;
-        bool two_wave = false;
-    } dense_stream;
     SpecConfig spec; // self-speculative decoding (MTP head or n-gram lookup); off by default
 };
 

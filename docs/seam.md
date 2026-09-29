@@ -1,6 +1,6 @@
 # The seam: how we hook llama.cpp without forking it
 
-Expert and dense streaming connect Meitte to llama.cpp through public mechanisms.
+Expert streaming connects Meitte to llama.cpp through public mechanisms.
 Multimodal input uses the separate mtmd boundary documented below. This file records both
 contracts so they can be re-verified when the submodule is updated.
 
@@ -128,11 +128,9 @@ whole project still compiles and runs — the serial streaming path is unchanged
 `--overlap` is affected, and it fails with a clear runtime error instead of silently
 falling back.
 
-The synced variant also exports `ggml_cpu_set_weight_ready_hook(ggml_weight_ready_hook_t, void *)`.
-CPU `MUL_MAT` calls it before reading `src0`; a false return aborts the graph. Dense overlap uses
-it to wait for a complete matrix, while serial dense mode works without it. CMake defines
-`BMOE_HAVE_WEIGHT_READY_HOOK` only when this symbol is present. Neither callback reads files or
-owns tensor storage; both only guard reads from the bound native-layout buffers.
+The callback reads no files and owns no tensor storage; it only guards reads from the bound
+native-layout buffers. (The synced fork also exports `ggml_cpu_set_weight_ready_hook`, used by
+the removed dense streaming mode; the engine no longer calls it.)
 
 **Sunset condition.** This fork exists for these CPU wait points. When upstream
 ships equivalent callbacks, the branch is dropped and the

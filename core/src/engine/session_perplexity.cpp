@@ -16,11 +16,6 @@ using namespace detail;
 PplResult Session::perplexity(const PplRequest & req) {
     auto & im = *impl_;
     PplResult r;
-    if (im.cfg.dense_stream.enabled && im.cancel_requested.load(std::memory_order_acquire) &&
-        !im.dense_stream.reset_after_cancel()) {
-        r.error = "dense stream could not recover after cancellation";
-        return r;
-    }
     im.cancel_requested.store(false, std::memory_order_release);
     const auto t0 = Clock::now();
     llama_context * ctx = im.ctx.get();
@@ -57,7 +52,6 @@ PplResult Session::perplexity(const PplRequest & req) {
         llama_batch warm = llama_batch_init(1, 0, 1);
         batch_fill(warm, tokens.data(), 1, 0, false);
         im.hook->set_batch_phase(req.as_decode ? 1 : 0);
-        im.hook->begin_graph();
         const int rc = llama_decode(ctx, warm);
         llama_batch_free(warm);
         if (rc != 0) {
@@ -100,7 +94,6 @@ PplResult Session::perplexity(const PplRequest & req) {
         const int prefix = std::max(1, std::min(req.skip, n - 1));
         batch_fill(b, tokens.data(), prefix, /*pos0*/ 0, /*all_logits*/ false);
         im.hook->set_batch_phase(0);
-        im.hook->begin_graph();
         if (llama_decode(ctx, b) != 0) {
             r.error = "prefill decode failed";
             return r;
@@ -110,7 +103,6 @@ PplResult Session::perplexity(const PplRequest & req) {
         for (int pos = prefix; pos < last; ++pos) {
             batch_fill(b, tokens.data() + pos, 1, pos, /*all_logits*/ true);
             im.hook->set_batch_phase(1);
-            im.hook->begin_graph();
             if (llama_decode(ctx, b) != 0) {
                 r.error = "decode failed at position " + std::to_string(pos);
                 return r;
@@ -124,7 +116,6 @@ PplResult Session::perplexity(const PplRequest & req) {
             const int chunk = std::min(im.cfg.n_batch, n - i);
             batch_fill(b, tokens.data() + i, chunk, /*pos0*/ i, /*all_logits*/ true);
             im.hook->set_batch_phase(req.as_decode ? 1 : 0);
-            im.hook->begin_graph();
             if (llama_decode(ctx, b) != 0) {
                 r.error = "decode failed at position " + std::to_string(i);
                 return r;

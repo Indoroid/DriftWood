@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **Removed dense streaming** (`--dense-stream`, `--dense-resident-mb`, `--dense-window-mb`,
+  `--dense-io-lanes`, `--dense-overlap`, `--dense-two-wave`) from the core, `meitte-cli` and
+  `meitte-server`: it read the streamed matrix set every token and was too slow (0.22–0.47 tok/s on
+  Qwen3.8 27B). Models without experts run from the plain mmap load. Removed with it:
+  `RunConfig::dense_stream`, `DenseStream`, the weight-ready hook use, the `dense_window_resident_frac`
+  progress/CSV column, the `dense_read_mib`/`dense_io_s`/`dense_wait_s`/`*_peak_rss_mib` summary keys
+  and the dense RunInfo preamble line. The C ABI keeps its six dense fields for layout compatibility;
+  `dense_stream != 0` now fails `meitte_open`. `--moe-stream` on a model without experts now says to
+  run it without `--moe-stream`. `--dense-weights` (the MoE non-expert weight policy) is unchanged.
 - Build: adapt the media prefill observer to the pinned llama.cpp, whose
   `mtmd_helper_decode_image_chunk` callback now receives `mtmd_helper_embd_batch` instead of a
   `llama_batch`. Every host build failed to compile `mtmd_runtime.cpp` after the Inkling submodule bump.

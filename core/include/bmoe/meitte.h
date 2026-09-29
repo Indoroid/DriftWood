@@ -56,7 +56,8 @@ typedef struct meitte_config {
     uint64_t media_max_bytes;
     /* Nonzero releases the model-file mapping after safe expert-stream initialization. */
     int32_t release_mmap;
-    /* Dense CPU streaming. Fields after struct_size are optional for older callers. */
+    /* Removed dense CPU streaming. The fields keep the layout: dense_stream must be 0 (meitte_open
+     * fails otherwise) and the other five are ignored. */
     int32_t dense_stream;
     int32_t dense_resident_mb;
     int32_t dense_window_mb;

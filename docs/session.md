@@ -85,8 +85,6 @@ On failure, `rejected` marks a request refused before it changed any state, and 
 only failure that ends the session (a fatal streaming I/O error); frontends act on these flags
 instead of matching error text or comparing token counts.
 Cancel is distinct from a fatal streaming error, which is sticky and ends the session.
-Dense streaming drains interrupted reads before the next turn, clears the active matrix
-window and keeps the fixed resident set; the next turn uses the same tensor addresses.
 
 ## Context capacity and opt-in recovery
 

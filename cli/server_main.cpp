@@ -1228,14 +1228,6 @@ static void print_usage(const char * argv0) {
                 "      --compute-trace-layers PATH aggregate compute timing by layer\n"
                 "      --io-trace PATH     record each expert read; requires --moe-stream\n"
                 "\n"
-                "  Dense streaming:\n"
-                "      --dense-stream      stream dense CPU matrices through a bounded window\n"
-                "      --dense-resident-mb N  fixed dense set in MiB (0 = RAM-based auto budget)\n"
-                "      --dense-window-mb N    active matrix window in MiB (default 1024)\n"
-                "      --dense-io-lanes N     positioned I/O lanes, 1 or 2 (default 2)\n"
-                "      --dense-overlap        use the CPU weight-ready hook for overlap\n"
-                "      --dense-two-wave       publish the first matrix of a layer first\n"
-                "\n"
                 "  MoE expert streaming:\n"
                 "      --moe-stream        keep routed experts on flash and load them on demand\n"
                 "      --cache-mb N|auto   LRU expert-cache budget in MiB; 0 disables it\n"
@@ -1527,18 +1519,6 @@ int main(int argc, char ** argv) {
             io_trace_path = next("--io-trace");
         else if (a == "--moe-stream")
             cfg.moe.enabled = true;
-        else if (a == "--dense-stream")
-            cfg.dense_stream.enabled = true;
-        else if (a == "--dense-resident-mb")
-            cfg.dense_stream.resident_mb = std::atoi(next("--dense-resident-mb"));
-        else if (a == "--dense-window-mb")
-            cfg.dense_stream.window_mb = std::atoi(next("--dense-window-mb"));
-        else if (a == "--dense-io-lanes")
-            cfg.dense_stream.io_lanes = std::atoi(next("--dense-io-lanes"));
-        else if (a == "--dense-overlap")
-            cfg.dense_stream.overlap = true;
-        else if (a == "--dense-two-wave")
-            cfg.dense_stream.two_wave = true;
         else if (a == "--cache-mb") {
             const std::string v = next("--cache-mb");
             if (v == "auto")

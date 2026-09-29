@@ -46,13 +46,9 @@ RunResult Session::generate(const GenerateRequest & req,
         res.error = std::move(msg);
         res.finish = res.context_exhausted ? FinishReason::ContextFull : FinishReason::Error;
         res.rejected = !turn_started;
-        res.fatal = im.hook->fatal() || im.source.fatal() || im.dense_stream.fatal();
+        res.fatal = im.hook->fatal() || im.source.fatal();
         return res;
     };
-    // Let interrupted dense reads stop before the next generation can reuse their addresses.
-    if (im.cfg.dense_stream.enabled && im.cancel_requested.load(std::memory_order_acquire) &&
-        !im.dense_stream.reset_after_cancel())
-        return fail("dense stream could not recover after cancellation");
     im.cancel_requested.store(false, std::memory_order_release);
     if (req.n_predict <= 0 || req.n_predict > std::numeric_limits<int>::max() - 8)
         return fail("n_predict must be positive and leave room for context accounting");
@@ -420,8 +416,6 @@ RunResult Session::generate(const GenerateRequest & req,
     PrefillTally prefill_tally;
     prefill_tally.begin(moe.enabled, im.source);
     const uint64_t prefill_faults0 = pio::major_faults();
-    const DenseStreamCounters dense_prefill0 = DenseStreamCounters::of(im.dense_stream);
-    double prefill_peak_rss = 0.0;
     const auto t_prefill0 = Clock::now();
     // Two predicates, deliberately distinct. spec_on is "the verify loop runs" — a wide batch, an
     // accept pass, a rollback — and both sources need all of it. mtp_on is "the draft comes from the
@@ -519,11 +513,6 @@ RunResult Session::generate(const GenerateRequest & req,
                     return abort_turn("expert stream I/O failed during overlap prefill");
                 return abort_turn("prefill decode failed");
             }
-            if (im.cfg.dense_stream.enabled) {
-                pio::ProcessMemory pm;
-                if (pio::process_memory(&pm))
-                    prefill_peak_rss = std::max(prefill_peak_rss, pm.rss_bytes / (1024.0 * 1024.0));
-            }
             im.trace_flush();
             if (mtp_on && !common_speculative_process(im.mtp.get(), pf))
                 return abort_turn("MTP draft context failed to process the prefill batch");
@@ -541,12 +530,6 @@ RunResult Session::generate(const GenerateRequest & req,
     // union of stalled intervals, cpu is whole-process (upper bound on compute-thread time).
     prefill_tally.end(moe.enabled, im.source);
     const uint64_t prefill_faults = pio::major_faults() - prefill_faults0;
-    if (im.cfg.dense_stream.enabled) {
-        const DenseStreamCounters now = DenseStreamCounters::of(im.dense_stream);
-        prefill_tally.read_mib = (now.bytes - dense_prefill0.bytes) / (1024.0 * 1024.0);
-        prefill_tally.io_seconds = (now.io_ns - dense_prefill0.io_ns) / 1e9;
-        prefill_tally.stall_seconds = (now.wait_ns - dense_prefill0.wait_ns) / 1e9;
-    }
     const float * logits = llama_get_logits_ith(ctx, -1);
     if (chat_on) im.kv_last_generation_start = im.kv_tokens.size();
 
@@ -569,9 +552,6 @@ RunResult Session::generate(const GenerateRequest & req,
     // prior prompts' totals; the deltas make each prompt self-relative.
     GenTally tally;
     tally.overlap = moe.overlap;
-    DenseStreamCounters dense_prev = DenseStreamCounters::of(im.dense_stream);
-    const DenseStreamCounters dense_decode0 = dense_prev;
-    double decode_peak_rss = 0.0;
     if (moe.enabled) tally.seed(prefill_tally.post);
     const IExpertSource::Stats st_spec0 = moe.enabled ? im.source.stats() : IExpertSource::Stats{};
     long long prev_spec_bytes = (long long) st_spec0.spec_read_bytes;
@@ -903,18 +883,6 @@ RunResult Session::generate(const GenerateRequest & req,
                 tally.record(m, wall, f1 - f0, c1 - c0, im.turn, moe.enabled ? &st : nullptr);
             else
                 tally.record(m, 0.0, 0, 0.0, im.turn, moe.enabled ? &st : nullptr);
-            if (im.cfg.dense_stream.enabled && e == 0) {
-                const DenseStreamCounters now = DenseStreamCounters::of(im.dense_stream);
-                m.read_bytes = now.bytes - dense_prev.bytes;
-                m.io_ms = (now.io_ns - dense_prev.io_ns) / 1e6;
-                m.stall_ms = (now.wait_ns - dense_prev.wait_ns) / 1e6;
-                m.compute_ms = std::max(0.0, m.wall_ms - m.stall_ms);
-                im.dense_fixed.sample_residency(pio::vm_page());
-                m.dense_resident_frac = im.dense_fixed.resident_frac();
-                m.dense_window_resident_frac = im.dense_stream.sample_residency();
-                dense_prev = now;
-                decode_peak_rss = std::max(decode_peak_rss, m.rss_mib);
-            }
             if (on_token) on_token(m);
             if (sink) sink->on_token(m);
         }
@@ -979,14 +947,6 @@ RunResult Session::generate(const GenerateRequest & req,
     s.prefill_stall_seconds = prefill_tally.stall_seconds;
     s.prefill_mgmt_seconds = prefill_tally.mgmt_seconds;
     s.prefill_majflt = prefill_faults;
-    s.prefill_peak_rss_mib = prefill_peak_rss;
-    s.decode_peak_rss_mib = decode_peak_rss;
-    if (im.cfg.dense_stream.enabled) {
-        const DenseStreamCounters now = DenseStreamCounters::of(im.dense_stream);
-        s.dense_read_mib = (now.bytes - dense_decode0.bytes) / (1024.0 * 1024.0);
-        s.dense_io_seconds = (now.io_ns - dense_decode0.io_ns) / 1e9;
-        s.dense_wait_seconds = (now.wait_ns - dense_decode0.wait_ns) / 1e9;
-    }
     s.majflt_per_token = n_gen ? (double) tally.majflt / n_gen : 0.0;
     s.cpu_s_per_token = n_gen ? tally.cpu_seconds / n_gen : 0.0;
     if (moe.enabled) {

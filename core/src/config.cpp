@@ -248,21 +248,9 @@ ValidationResult validate(const RunConfig & cfg) {
         if (override.pattern.empty() || override.buffer_type.empty())
             return fail("tensor buffer overrides require both a pattern and a buffer type");
     }
-    if ((cfg.moe.enabled || cfg.dense_stream.enabled) && !cfg.tensor_buffer_overrides.empty()) {
+    if (cfg.moe.enabled && !cfg.tensor_buffer_overrides.empty()) {
         return fail("tensor buffer overrides cannot be combined with streaming: native GGUF offsets and tensor "
                     "pointers are required");
-    }
-    if (!cfg.dense_stream.enabled &&
-        (cfg.dense_stream.resident_mb != 0 || cfg.dense_stream.window_mb != 1024 || cfg.dense_stream.io_lanes != 2 ||
-         cfg.dense_stream.overlap || cfg.dense_stream.two_wave))
-        return fail("dense-stream options require --dense-stream");
-    if (cfg.dense_stream.enabled) {
-        const auto & d = cfg.dense_stream;
-        if (cfg.moe.enabled) return fail("dense streaming and MoE streaming are separate modes");
-        if (d.resident_mb < 0 || d.window_mb <= 0 || d.io_lanes < 1 || d.io_lanes > 2)
-            return fail("dense streaming requires resident_mb >= 0, window_mb > 0 and 1 or 2 I/O lanes");
-        if (d.two_wave && !d.overlap) return fail("dense two-wave requires dense overlap");
-        if (cfg.spec.is_mtp()) return fail("dense streaming with an MTP draft context is not yet supported");
     }
     if (cfg.cache_type_v != KvCacheType::F32 && cfg.cache_type_v != KvCacheType::F16 &&
         cfg.cache_type_v != KvCacheType::BF16 && cfg.flash_attention == FlashAttentionMode::Disabled) {

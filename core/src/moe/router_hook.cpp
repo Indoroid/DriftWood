@@ -1,6 +1,5 @@
 #include "router_hook.h"
 #include "router_tensor.h"
-#include "dense_stream.h"
 
 #include "ggml.h"
 #include "../io/platform_io.h"
@@ -136,9 +135,6 @@ void RouterHook::begin_capture() {
         L = LayerExperts{};
     captured_weight_objects_.clear();
     captured_weight_seen_.clear();
-    matrix_weights_.clear();
-    early_matrix_weights_.clear();
-    layer_seen_.assign((size_t) std::max(0, n_layer_), false);
     row_gathered_.clear();
     row_disqualified_.clear();
     row_computed_index_.clear();
@@ -333,21 +329,6 @@ bool RouterHook::on_eval(ggml_tensor * t, bool ask) {
     // ── capture: harvest expert weight tensors from every node's sources ──
     if (capturing_) {
         if (ask) {
-            const int node_il = node_layer(t->name);
-            const bool first_in_layer = node_il >= 0 && node_il < n_layer_ && !layer_seen_[(size_t) node_il];
-            if (node_il >= 0 && node_il < n_layer_) layer_seen_[(size_t) node_il] = true;
-            if (t->op == GGML_OP_MUL_MAT) {
-                const ggml_tensor * weight = t->src[0];
-                while (weight && weight->op != GGML_OP_NONE && weight->src[0])
-                    weight = weight->src[0];
-                if (weight && weight->op == GGML_OP_NONE && weight->name[0]) {
-                    matrix_weights_.insert(weight->name);
-                    int weight_il = -1;
-                    if (std::sscanf(weight->name, "blk.%d.", &weight_il) == 1 && weight_il >= 0 &&
-                        weight_il < n_layer_ && (first_in_layer || !layer_seen_[(size_t) weight_il]))
-                        early_matrix_weights_.insert(weight->name);
-                }
-            }
             for (int s = 0; s < GGML_MAX_SRC; ++s) {
                 ggml_tensor * src = t->src[s];
                 if (!src || src->name[0] == '\0') continue;
@@ -379,20 +360,6 @@ bool RouterHook::on_eval(ggml_tensor * t, bool ask) {
             }
         }
         return false; // capture never isolates a node
-    }
-
-    if (dense_stream_) {
-        const int dense_il = node_layer(t->name);
-        if (ask) {
-            if (dense_il >= 0 && dense_il < n_layer_ && dense_il != dense_ask_layer_) {
-                dense_ask_layer_ = dense_il;
-                dense_boundaries_.insert(t);
-                return true;
-            }
-        } else if (dense_boundaries_.erase(t)) {
-            if (!dense_stream_->enter_layer(dense_il) && dense_stream_->fatal())
-                fatal_.store(true, std::memory_order_release);
-        }
     }
 
     // ── row-gathered dense tables: put the rows in place before the node reads them ──

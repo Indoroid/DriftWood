@@ -51,8 +51,6 @@ meitte_config meitte_default_config() {
     out.video_fps = 1.0f;
     out.video_max_frames = 32;
     out.media_max_bytes = 64ull * 1024 * 1024;
-    out.dense_window_mb = 1024;
-    out.dense_io_lanes = 2;
     return out;
 }
 
@@ -121,12 +119,10 @@ meitte_session * meitte_open(const meitte_config * cfg, char * error, size_t cap
         MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, media_max_bytes);
         MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, release_mmap);
         MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_stream);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_resident_mb);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_window_mb);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_io_lanes);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_overlap);
-        MEITTE_COPY_FIELD(meitte_config, input, cfg, config_size, dense_two_wave);
         if (!input.model_path || !input.model_path[0]) throw std::invalid_argument("model path is required");
+        // Dense streaming was removed. The fields keep the struct layout; a caller that still asks
+        // for the mode gets an error instead of a silent mmap run.
+        if (input.dense_stream) throw std::invalid_argument("dense streaming was removed; load dense models with mmap");
         if (input.speculation < 0 || input.speculation > 2) throw std::invalid_argument("invalid speculation source");
         auto context_mode = [](int32_t value) {
             if (value < 0 || value > 2) throw std::invalid_argument("invalid context mode");
@@ -141,12 +137,6 @@ meitte_session * meitte_open(const meitte_config * cfg, char * error, size_t cap
         rc.moe.enabled = input.streaming != 0;
         rc.moe.cache_mb = input.cache_mb;
         rc.moe.release_mmap = input.release_mmap != 0;
-        rc.dense_stream.enabled = input.dense_stream != 0;
-        rc.dense_stream.resident_mb = input.dense_resident_mb;
-        rc.dense_stream.window_mb = input.dense_window_mb;
-        rc.dense_stream.io_lanes = input.dense_io_lanes;
-        rc.dense_stream.overlap = input.dense_overlap != 0;
-        rc.dense_stream.two_wave = input.dense_two_wave != 0;
         rc.context.grow = context_mode(input.context_grow);
         rc.context.summarize = context_mode(input.context_summarize);
         rc.context.trim = context_mode(input.context_trim);

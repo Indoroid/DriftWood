@@ -1,8 +1,8 @@
 # BigMoeOnEdge — top-level build.
 #
 # The engine (`bmoe_core`) uses llama.cpp's public model, GGUF and eval-callback APIs for
-# serial expert and dense streaming. Optional CPU overlap uses expert and matrix readiness
-# callbacks from the synced llama.cpp fork. The serial path builds against stock upstream.
+# serial expert streaming. Optional CPU overlap uses the expert-ready callback from the synced
+# llama.cpp fork. The serial path builds against stock upstream.
 # See docs/seam.md § 4.
 #
 # llama.cpp is an optional dependency at configure time: when the submodule is absent

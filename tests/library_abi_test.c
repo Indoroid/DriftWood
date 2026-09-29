@@ -59,8 +59,8 @@ int main(void) {
               legacy.config.context_size == 2048 && legacy.config.chat == 1,
           "config init writes the defaults that fit");
 
-    /* The old caller's tail padding holds garbage. Read as dense_stream, it would turn dense
-     * streaming on next to MoE streaming, which validation rejects before any load is attempted. */
+    /* The old caller's tail padding holds garbage. Read as dense_stream, it would request the
+     * removed dense streaming, which meitte_open rejects before any load is attempted. */
     legacy.config.model_path = "/nonexistent/meitte-abi-test.gguf";
     legacy.config.streaming = 1;
     memset((unsigned char *) &legacy.config + release_end, 0xFF, sizeof(legacy.config) - release_end);

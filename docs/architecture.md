@@ -3,7 +3,7 @@
 Meitte is a small ports-and-adapters engine that sits **on top of** llama.cpp's
 public API. Its guiding constraint: drive streaming through the public API so upstream
 updates cost a submodule pointer bump and nothing else. The serial streamer holds to this
-against stock upstream. Optional expert and dense overlap use CPU readiness callbacks on the
+against stock upstream. Optional expert overlap uses a CPU readiness callback on the
 synced fork branch (see [seam.md § 4](seam.md)).
 
 ## Layers
@@ -30,7 +30,6 @@ core/
                 router_policy — cache-aware dropping and substitution
                 router_predict — next-layer prediction, its probe, route-ahead
                 dense_weights — non-expert weight policy + the residency sensor
-                dense_stream — bounded stable-address matrix windows for dense models
                 row_stream - row-gathered tables served from flash (see row-gathered-tables.md)
     engine/     session — the Session pimpl; state in session_impl.h, split by phase:
                   session_open (load, contexts, capture, binding), session_generate (prefill +
@@ -87,22 +86,13 @@ is the whole upgrade.
 The one place we do carry an extension is the optional `--overlap` feature. Overlapping a
 token's expert reads with its expert matmuls needs a per-expert wait point *inside* the CPU
 MoE kernel, which no public API exposes, so the submodule pins a fork branch adding one
-readiness hook on top of the upstream commit. Dense `--dense-overlap` likewise needs a
-per-matrix wait point in CPU `MUL_MAT`. Both hooks are zero-cost when unregistered,
-the serial path still builds against stock upstream, and they can be dropped when upstream
+readiness hook on top of the upstream commit. The hook is zero-cost when unregistered,
+the serial path still builds against stock upstream, and it can be dropped when upstream
 ships an equivalent callback. Details and the sunset condition are in
 [seam.md § 4](seam.md).
 
 See [seam.md](seam.md) for the exact callback contract and the ggml behaviour it relies
 on.
-
-Dense mode captures GGUF weight leaves from the scheduler's `ask` callbacks and aborts that
-capture before a full forward pass. It pins embeddings, output and control tensors plus a
-RAM-budgeted set of early matrices. The remaining matrices keep stable reserved addresses; a
-one-layer lookahead commits and fills only the active window. It drops the old mapped pages once a
-matrix no longer points to them. A layer-boundary eval callback evicts earlier layers after their
-last graph consumer. Serial execution waits at that boundary; the optional CPU weight-ready hook
-waits per matrix during compute.
 
 ## The generation loop
 
